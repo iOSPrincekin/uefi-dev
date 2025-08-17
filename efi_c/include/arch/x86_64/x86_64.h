@@ -279,3 +279,81 @@ void arch_init_page_tables(Memory_Map_Info *mmap) {
     memset(pml4, 0, sizeof *pml4);  
 }
 
+// =============================================================
+// Write byte AL to port DX
+// =============================================================
+void outb(uint16_t port, uint8_t value) {
+    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+// =============================================================
+// Write word AX to port DX
+// =============================================================
+void outw(uint16_t port, uint16_t value) {
+    __asm__ volatile ("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+// =============================================================
+// Read port DX to byte AL
+// =============================================================
+uint8_t inb(uint16_t port) {
+    uint8_t value;
+    __asm__ volatile ("inb %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+// =============================================================
+// Read port DX to word AX
+// =============================================================
+uint16_t inw(uint16_t port) {
+    uint16_t value;
+    __asm__ volatile ("inw %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
+// =============================================================
+// Play square wave frequency on PC Speaker
+// Adapted from https://wiki.osdev.org/PC_Speaker
+// =============================================================
+void pcspk_play_sound(uint32_t frequency) {
+    // Set PIT to input frequency
+    uint32_t divisor = 1193182 / frequency;
+    outb(0x43, 0xB6);
+    outb(0x42, (uint8_t)divisor);        // Low byte
+    outb(0x42, (uint8_t)(divisor >> 8)); // High byte
+
+    // Play sound using PC speaker
+    uint8_t temp = inb(0x61);
+    if (temp != (temp | 3)) outb(0x61, temp | 3);
+}
+
+// =============================================================
+// Stop PC Speaker sound
+// =============================================================
+void pcspk_stop_sound(void) {
+    outb(0x61, inb(0x61) & 0xFC);
+
+    // Reset PIT frequency
+    uint32_t divisor = 1193182;
+    outb(0x43, 0xB6);
+    outb(0x42, (uint8_t)divisor);        // Low byte
+    outb(0x42, (uint8_t)(divisor >> 8)); // High byte
+}
+
+// =============================================================
+// Example test beep for PC Speaker
+// =============================================================
+void pcspk_test(void) {
+    pcspk_play_sound(440);    // 440hz square wave
+
+    // Wait up to ~1 second
+    EFI_TIME old_time = {0}, new_time = {0};
+    EFI_TIME_CAPABILITIES time_cap = {0};
+    rs->GetTime(&new_time, &time_cap);
+    old_time = new_time;
+    while (old_time.Second == new_time.Second) 
+        rs->GetTime(&new_time, &time_cap);
+
+    pcspk_stop_sound();	      // Stop pc speaker sound
+}
+

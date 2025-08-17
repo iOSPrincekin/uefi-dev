@@ -2519,6 +2519,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     Timer_Context context = { .rows = rows, .cols = cols };
 
+    // Uncomment for beep, if pcspeaker device is defined/usable
+    //#if ARCH == x86_64
+    //pcspk_test();
+    //#endif
+
     // Screen loop
     bool running = true;
     while (running) {

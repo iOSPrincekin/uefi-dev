@@ -14,3 +14,12 @@ qemu-system-x86_64 \
 -rtc base=localtime \
 -net none
 
+
+# For pc speaker audio, add these lines depending on your sound backend
+#   for "-audiodev <backend>":
+# pa       = pulseaudio
+# alsa     = alsa
+# pipewire = pipewire
+
+#-audiodev pa,id=speaker \
+#-machine pcspk-audiodev=speaker \
