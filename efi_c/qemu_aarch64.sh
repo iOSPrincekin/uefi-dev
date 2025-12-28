@@ -1,6 +1,13 @@
 #!/bin/sh
 
 # Sendin' Out a TEST O S
+# Detect display backend based on OS
+if [ "$(uname)" = "Darwin" ]; then
+    DISPLAY_BACKEND="cocoa"
+else
+    DISPLAY_BACKEND="gtk,gl=on,zoom-to-fit=off,window-close=on"
+fi
+
 qemu-system-aarch64 \
 -drive format=raw,file=../UEFI-GPT-image-creator/test.hdd \
 -bios QEMU_EFI_AARCH64.raw \
@@ -8,7 +15,7 @@ qemu-system-aarch64 \
 -machine virt \
 -cpu max \
 -device virtio-gpu-pci \
--display gtk,gl=on,zoom-to-fit=off,window-close=on \
+-display $DISPLAY_BACKEND \
 -usb \
 -device qemu-xhci \
 -device usb-kbd \

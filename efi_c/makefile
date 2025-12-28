@@ -93,6 +93,7 @@ ADD_KERNEL = \
 	fi
 
 all: $(OVMF) $(EFI_APP) $(KERNEL) 
+	@$(ADD_KERNEL)
 	$(QEMU_SCRIPT)
 
 $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM):
