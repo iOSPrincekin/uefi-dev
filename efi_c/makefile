@@ -7,23 +7,23 @@ ARCH 	?= x86_64
 MACHINE ?= unknown
 
 ifeq ($(OS), Windows_NT)
-HOST_OS     ::= Windows
-QEMU_SCRIPT ::= qemu_$(ARCH).bat
+HOST_OS     := Windows
+QEMU_SCRIPT := qemu_$(ARCH).bat
 else
-HOST_OS     ::= Linux
-QEMU_SCRIPT ::= ./qemu_$(ARCH).sh
+HOST_OS     := Linux
+QEMU_SCRIPT := ./qemu_$(ARCH).sh
 endif
 
 # Uncomment disk image program & shell script 
-DISK_IMG_PGM ::= write_gpt
+DISK_IMG_PGM := write_gpt
 
-DISK_IMG_FOLDER ::= ../UEFI-GPT-image-creator/
+DISK_IMG_FOLDER := ../UEFI-GPT-image-creator/
 
 ifeq ($(ARCH), x86_64)
-OVMF ::= $(DISK_IMG_FOLDER)bios64.bin
+OVMF := $(DISK_IMG_FOLDER)bios64.bin
 endif
 ifeq ($(ARCH), aarch64)
-OVMF ::= QEMU_EFI_AARCH64.raw
+OVMF := QEMU_EFI_AARCH64.raw
 endif
 
 # Uncomment CC/LDFLAGS for EFI object - gcc
@@ -34,23 +34,19 @@ endif
 	-e efi_main 
 
 # Uncomment CC/LDFLAGS for EFI object - clang
-EFICC       ::= clang -target $(ARCH)-$(MACHINE)-windows 
-EFI_LDFLAGS ::= \
-	-nostdlib \
-	-fuse-ld=lld-link \
-	-Wl,-subsystem:efi_application \
-	-Wl,-entry:efi_main
+EFICC       := clang -target $(ARCH)-$(MACHINE)-windows
+EFI_LDFLAGS := -nostdlib -fuse-ld=lld-link -Wl,-subsystem:efi_application -Wl,-entry:efi_main
 
 # ELF files
-ELFCC ::= clang -target $(ARCH)-$(MACHINE)-elf 
-ELFLD ::= ld.lld
+ELFCC := clang -target $(ARCH)-$(MACHINE)-elf
+ELFLD := ld.lld
 
 # PE32+ files
-PECC  ::= $(ARCH)-w64-mingw32-gcc
-PELD  ::= $(ARCH)-w64-mingw32-ld
+PECC  := $(ARCH)-w64-mingw32-gcc
+PELD  := $(ARCH)-w64-mingw32-ld
 
 # Common CFLAGS
-CFLAGS ::= \
+CFLAGS := \
 	-std=c17 \
 	-MMD \
 	-Wall \
@@ -64,41 +60,48 @@ CFLAGS ::= \
 # -I include for "#include <arch/ARCH/ARCH.h>" or other files under top level "include" directory
 CFLAGS += -D ARCH=$(ARCH) -D MACHINE=$(MACHINE) -I include
 
-KERNEL_SRC     ::= kernel.c
-KERNEL_CFLAGS  ::= $(CFLAGS) -fPIE
-KERNEL_LDFLAGS ::= -e kmain -nostdlib -pie
+KERNEL_SRC     := kernel.c
+KERNEL_CFLAGS  := $(CFLAGS) -fPIE
+KERNEL_LDFLAGS := -e kmain -nostdlib -pie
 
-EFISRC  ::= efi.c
-EFIOBJ  ::= $(EFISRC:%.c=%_$(ARCH).o)
-DEPENDS ::= $(EFIOBJ:.o=.d) $(KERNEL_SRC:.c=.d)
+EFISRC  := efi.c
+EFIOBJ  := $(EFISRC:%.c=%_$(ARCH).o)
+DEPENDS := $(EFIOBJ:.o=.d) $(KERNEL_SRC:.c=.d)
 
 # EFI application to use, should automatically boot from UEFI/OVMF if in /EFI/BOOT/ folder in 
 #  the EFI System Partition (ESP)
 ifeq ($(ARCH), x86_64) 
-EFI_APP ::= BOOTX64.EFI
+EFI_APP := BOOTX64.EFI
 else ifeq ($(ARCH), aarch64) 
-EFI_APP ::= BOOTAA64.EFI
+EFI_APP := BOOTAA64.EFI
 endif
 
 # Uncomment kernel binary format to build
-KERNEL ::= kernel.elf    # ELF64 PIE kernel binary
-#KERNEL ::= kernel.pe     # PE32+ PIE kernel binary
-#KERNEL ::= kernel.binelf # Flat binary PIE kernel from ELF file
-#KERNEL ::= kernel.binpe  # Flat binary PIE kernel from PE file
+KERNEL := kernel.elf    # ELF64 PIE kernel binary
+#KERNEL := kernel.pe     # PE32+ PIE kernel binary
+#KERNEL := kernel.binelf # Flat binary PIE kernel from ELF file
+#KERNEL := kernel.binpe  # Flat binary PIE kernel from PE file
 
-FONT ::= ter-132n.psf	# PSF2 Bitmapped Font: Terminus 16x32 ISO8859-1
+FONT := ter-132n.psf	# PSF2 Bitmapped Font: Terminus 16x32 ISO8859-1
 
 # Add kernel binary to new disk image
 ADD_KERNEL = \
-	cd $(DISK_IMG_FOLDER); \
-	./$(DISK_IMG_PGM) -ae /EFI/BOOT/ ../efi_c/$(EFI_APP) \
-					  -ad ../efi_c/$(KERNEL) ../efi_c/$(FONT);
+	if [ -f $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM) ]; then \
+		cd $(DISK_IMG_FOLDER); \
+		./$(DISK_IMG_PGM) -ae /EFI/BOOT/ ../efi_c/$(EFI_APP) \
+						  -ad ../efi_c/$(KERNEL) ../efi_c/$(FONT); \
+	fi
 
-all: $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM) $(OVMF) $(EFI_APP) $(KERNEL) 
+all: $(OVMF) $(EFI_APP) $(KERNEL) 
 	$(QEMU_SCRIPT)
 
 $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM):
-	cd $(DISK_IMG_FOLDER) && $(MAKE) 
+	@if [ -f $(DISK_IMG_FOLDER)/Makefile ] || [ -f $(DISK_IMG_FOLDER)/makefile ]; then \
+		cd $(DISK_IMG_FOLDER) && $(MAKE); \
+	else \
+		echo "Warning: $(DISK_IMG_FOLDER)/Makefile not found, skipping $(DISK_IMG_PGM) build"; \
+		touch $@; \
+	fi 
 
 # Pad out AARCH64 ovmf file to 64MiB for QEMU to work correctly if wanting to use pflash,
 #   the -bios option otherwise seems fine with the default size.
@@ -122,7 +125,8 @@ $(EFIOBJ): $(EFISRC)
 	$(EFICC) $(CFLAGS) -c -o $@ $<
 
 kernel.elf: $(KERNEL_SRC)
-	$(ELFCC) $(KERNEL_CFLAGS) $(KERNEL_LDFLAGS) -o $@ $<
+	$(ELFCC) $(KERNEL_CFLAGS) -c -o kernel.o $<
+	$(ELFLD) $(KERNEL_LDFLAGS) -o $@ kernel.o
 	$(ADD_KERNEL)
 
 kernel.pe: $(KERNEL_SRC)
