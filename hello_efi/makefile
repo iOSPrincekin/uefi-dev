@@ -12,17 +12,18 @@ QEMU = ./qemu.sh
 DISK_FLAGS =
 endif
 
-# Uncomment for gcc, or move to OS check above, etc.
-CC = x86_64-w64-mingw32-gcc \
-	-Wl,--subsystem,10 \
-	-e efi_main 
-
-# Uncomment for clang, or move to OS check above, etc.
-#CC = clang \
+# Use clang by default (works on macOS and Linux)
+# For gcc/mingw-w64, uncomment the gcc section below and comment out clang
+CC = clang \
 	-target x86_64-unknown-windows \
 	-fuse-ld=lld-link \
 	-Wl,-subsystem:efi_application \
 	-Wl,-entry:efi_main
+
+# Uncomment for gcc/mingw-w64 (requires x86_64-w64-mingw32-gcc to be installed)
+#CC = x86_64-w64-mingw32-gcc \
+#	-Wl,--subsystem,10 \
+#	-e efi_main
 
 CFLAGS = \
 	-std=c17 \
