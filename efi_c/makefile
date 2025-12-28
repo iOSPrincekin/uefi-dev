@@ -87,13 +87,18 @@ FONT := ter-132n.psf	# PSF2 Bitmapped Font: Terminus 16x32 ISO8859-1
 # Add kernel binary to new disk image
 ADD_KERNEL = \
 	if [ -f $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM) ]; then \
-		cd $(DISK_IMG_FOLDER); \
-		./$(DISK_IMG_PGM) -ae /EFI/BOOT/ ../efi_c/$(EFI_APP) \
-						  -ad ../efi_c/$(KERNEL) ../efi_c/$(FONT); \
+		cd $(DISK_IMG_FOLDER) && ./$(DISK_IMG_PGM) -ae /EFI/BOOT/ ../efi_c/$(EFI_APP) \
+						  -ad ../efi_c/$(KERNEL) ../efi_c/$(FONT) || exit 1; \
+	else \
+		echo "Warning: $(DISK_IMG_PGM) not found, skipping disk image creation"; \
 	fi
 
-all: $(OVMF) $(EFI_APP) $(KERNEL) 
-	@$(ADD_KERNEL)
+all: $(OVMF) $(EFI_APP) $(KERNEL) $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM)
+	$(ADD_KERNEL)
+	@if [ ! -f $(DISK_IMG_FOLDER)/test.hdd ]; then \
+		echo "Error: test.hdd was not created. Please check write_gpt output above."; \
+		exit 1; \
+	fi
 	$(QEMU_SCRIPT)
 
 $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM):
