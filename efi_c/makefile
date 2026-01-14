@@ -77,9 +77,9 @@ EFI_APP := BOOTAA64.EFI
 endif
 
 # Uncomment kernel binary format to build
-#KERNEL := kernel.elf    # ELF64 PIE kernel binary
+KERNEL := kernel.elf    # ELF64 PIE kernel binary
 #KERNEL := kernel.pe     # PE32+ PIE kernel binary
-KERNEL := kernel.binelf # Flat binary PIE kernel from ELF file
+#KERNEL := kernel.binelf # Flat binary PIE kernel from ELF file
 #KERNEL := kernel.binpe  # Flat binary PIE kernel from PE file
 
 FONT := ter-132n.psf	# PSF2 Bitmapped Font: Terminus 16x32 ISO8859-1

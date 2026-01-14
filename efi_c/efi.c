@@ -543,74 +543,74 @@ CHAR16* strchr_u16(CHAR16* str, CHAR16 c){
 
 EFI_STATUS read_esp_files(void){
     EFI_STATUS status = EFI_SUCCESS;
-
+    
     // Get ESP root directory
     EFI_FILE_PROTOCOL *dirp = esp_root_dir();
     if (!dirp) {
         error(0, u"Could not get ESP root directory.\r\n");
         goto done;
     }
-
+    
     // Start at root directory
     CHAR16 current_directory[256];
     strcpy_c16(current_directory, u"/");
-
+    
     // Print dir entries for currently opened directory
     // Overall input loop
     INT32 csr_row = 1;
     while (true) {
         cout->ClearScreen(cout);
         printf_c16(u"%s:\r\n", current_directory);
-
+        
         INT32 num_entries = 0;
         EFI_FILE_INFO file_info;
-
+        
         dirp->SetPosition(dirp, 0);                 // Reset to start of directory entries
         UINTN buf_size = sizeof file_info;
         dirp->Read(dirp, &buf_size, &file_info);
         while (buf_size > 0) {
             num_entries++;
-
+            
             // Got next dir entry, print info
             if (csr_row == cout->Mode->CursorRow) {
                 // Highlight row cursor/user is on
                 cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
             }
-
+            
             printf_c16(u"%s %s\r\n",
-                   (file_info.Attribute & EFI_FILE_DIRECTORY) ? u"[DIR] " : u"[FILE]",
-                   file_info.FileName);
-
+                       (file_info.Attribute & EFI_FILE_DIRECTORY) ? u"[DIR] " : u"[FILE]",
+                       file_info.FileName);
+            
             if (csr_row+1 == cout->Mode->CursorRow) {
                 // De-highlight rows after cursor
                 cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
             }
-
+            
             buf_size = sizeof file_info;
             dirp->Read(dirp, &buf_size, &file_info);
         }
-
+        
         EFI_INPUT_KEY key = get_key();
         switch (key.ScanCode) {
             case SCANCODE_ESC:
                 // ESC Key, exit and go back to main menu
                 goto done;
                 break;
-
+                
             case SCANCODE_UP_ARROW:
             case SCANCODE_DOWN_ARROW:
                 // Go up or down 1 row in range [1:num_entries] (circular buffer)
                 csr_row = (key.ScanCode == SCANCODE_UP_ARROW)
-                          ? ((csr_row-1 + num_entries-1) % num_entries) + 1
-                          : (csr_row % num_entries) + 1;
+                ? ((csr_row-1 + num_entries-1) % num_entries) + 1
+                : (csr_row % num_entries) + 1;
                 break;
-
+                
             default:
                 if (key.UnicodeChar == u'\r') {
                     // Enter key:
                     //   for a directory, enter that directory and iterate the loop
                     //   for a file, print the file contents to screen
-
+                    
                     // Get directory entry under user cursor row
                     dirp->SetPosition(dirp, 0);  // Reset to start of directory entries
                     INT32 i = 0;
@@ -619,7 +619,7 @@ EFI_STATUS read_esp_files(void){
                         dirp->Read(dirp, &buf_size, &file_info);
                         i++;
                     } while (i < csr_row);
-
+                    
                     if (file_info.Attribute & EFI_FILE_DIRECTORY) {
                         // Directory, open and enter this new directory
                         EFI_FILE_PROTOCOL *new_dir;
@@ -628,27 +628,27 @@ EFI_STATUS read_esp_files(void){
                                             file_info.FileName,
                                             EFI_FILE_MODE_READ,
                                             0);
-
+                        
                         if (EFI_ERROR(status)) {
                             error(status, u"Could not open new directory %s\r\n", file_info.FileName);
                             goto done;
                         }
-
+                        
                         dirp->Close(dirp);  // Close last opened dir
                         dirp = new_dir;     // Set new opened dir
                         csr_row = 1;        // Reset user row to first entry in new directory
-
+                        
                         // Set new path for current directory
                         if (!strncmp_u16(file_info.FileName, u".", 2)) {
                             // Current directory, do nothing
-
+                            
                         } else if (!strncmp_u16(file_info.FileName, u"..", 3)) {
                             // Parent directory, go back up and remove dir name from path
                             CHAR16 *pos = strrchr_u16(current_directory, u'/');
                             if (pos == current_directory) pos++;    // Move past initial root dir '/'
-
+                            
                             *pos = u'\0';
-
+                            
                         } else {
                             // Go into nested directory, add on to current string
                             if (current_directory[1] != u'\0') {
@@ -658,7 +658,7 @@ EFI_STATUS read_esp_files(void){
                         }
                         continue;   // Continue overall loop and print new directory entries
                     }
-
+                    
                     // Else this is a file, print contents:
                     // Allocate buffer for file
                     VOID *buffer = NULL;
@@ -668,7 +668,7 @@ EFI_STATUS read_esp_files(void){
                         error(status, u"Could not allocate memory for file %s\r\n", file_info.FileName);
                         goto done;
                     }
-
+                    
                     // Open file
                     EFI_FILE_PROTOCOL *file = NULL;
                     status = dirp->Open(dirp,
@@ -676,29 +676,29 @@ EFI_STATUS read_esp_files(void){
                                         file_info.FileName,
                                         EFI_FILE_MODE_READ,
                                         0);
-
+                    
                     if (EFI_ERROR(status)) {
                         error(status, u"Could not open file %s\r\n", file_info.FileName);
                         goto done;
                     }
-
+                    
                     // Read file into buffer
                     status = dirp->Read(file, &buf_size, buffer);
                     if (EFI_ERROR(status)) {
                         error(status, u"Could not read file %s into buffer.\r\n", file_info.FileName);
                         goto done;
                     }
-
+                    
                     if (buf_size != file_info.FileSize) {
                         error(0, u"Could not read all of file %s into buffer.\r\n"
                               u"Bytes read: %u, Expected: %u\r\n",
                               file_info.FileName, buf_size, file_info.FileSize);
                         goto done;
                     }
-
+                    
                     // Print buffer contents
                     printf_c16(u"\r\nFile Contents:\r\n");
-
+                    
                     char *pos = (char *)buffer;
                     for (UINTN bytes = buf_size; bytes > 0; bytes--) {
                         CHAR16 str[2];
@@ -710,38 +710,38 @@ EFI_STATUS read_esp_files(void){
                         } else {
                             printf_c16(u"%s", str);
                         }
-
+                        
                         pos++;
                     }
-
+                    
                     printf_c16(u"\r\n\r\nPress any key to continue...\r\n");
                     get_key();
-
+                    
                     // Free memory for file when done
                     bs->FreePool(buffer);
-
+                    
                     // Close file handle
                     dirp->Close(file);
                 }
                 break;
         }
     }
-
-    done:
+    
+done:
     if (dirp) dirp->Close(dirp);    // Cleanup directory pointer
     return status;
 }
 
 EFI_STATUS print_block_io_partitions(void){
     EFI_STATUS status = EFI_SUCCESS;
-
+    
     cout->ClearScreen(cout);
-
+    
     EFI_GUID bio_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
     EFI_BLOCK_IO_PROTOCOL *biop;
     UINTN num_handles = 0;
     EFI_HANDLE *handle_buffer = NULL;
-
+    
     // Get media ID for this disk image first, to compare to others in output
     UINT32 this_image_media_id = 0;
     status = get_disk_image_mediaID(&this_image_media_id);
@@ -749,14 +749,14 @@ EFI_STATUS print_block_io_partitions(void){
         printf_c16(u"Could not get disk image media ID.\r\n");
         return status;
     }
-
+    
     // Loop through and print all partition information found
     status = bs->LocateHandleBuffer(ByProtocol, &bio_guid, NULL, &num_handles, &handle_buffer);
     if (EFI_ERROR(status)) {
         printf_c16(u"Could not locate any Block IO Protocols.\r\n");
         return status;
     }
-
+    
     UINT32 last_media_id = -1;  // Keep track of currently opened Media info
     for (UINTN i = 0; i < num_handles; i++) {
         status = bs->OpenProtocol(handle_buffer[i],
@@ -765,41 +765,41 @@ EFI_STATUS print_block_io_partitions(void){
                                   image,
                                   NULL,
                                   EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-
+        
         if (EFI_ERROR(status)) {
             printf_c16(u"Could not Open Block IO protocol on handle %u.\r\n", i);
             continue;
         }
-
+        
         // Print Block IO Media Info for this Disk/partition
         if (last_media_id != biop->Media->MediaId) {
             last_media_id = biop->Media->MediaId;
             printf_c16(u"Media ID: %u %s\r\n",
-                   last_media_id,
-                   (last_media_id == this_image_media_id ? u"(Disk Image)" : u""));
+                       last_media_id,
+                       (last_media_id == this_image_media_id ? u"(Disk Image)" : u""));
         }
-
+        
         if (biop->Media->LastBlock == 0) {
             // Only really care about partitions/disks above 1 block in size
             continue;
         }
-
+        
         printf_c16(u"Rmv: %s, Pr: %s, LglPrt: %s, RdOnly: %s, Wrt$: %s\r\n"
-               u"BlkSz: %u, IoAln: %u, LstBlk: %u, LwLBA: %u, LglBlkPerPhys: %u\r\n"
-               u"OptTrnLenGran: %u\r\n",
-               biop->Media->RemovableMedia   ? u"Y" : u"N",
-               biop->Media->MediaPresent     ? u"Y" : u"N",
-               biop->Media->LogicalPartition ? u"Y" : u"N",
-               biop->Media->ReadOnly         ? u"Y" : u"N",
-               biop->Media->WriteCaching     ? u"Y" : u"N",
-
-               biop->Media->BlockSize,
-               biop->Media->IoAlign,
-               biop->Media->LastBlock,
-               biop->Media->LowestAlignedLba,
-               biop->Media->LogicalBlocksPerPhysicalBlock,
-               biop->Media->OptimalTransferLengthGranularity);
-
+                   u"BlkSz: %u, IoAln: %u, LstBlk: %u, LwLBA: %u, LglBlkPerPhys: %u\r\n"
+                   u"OptTrnLenGran: %u\r\n",
+                   biop->Media->RemovableMedia   ? u"Y" : u"N",
+                   biop->Media->MediaPresent     ? u"Y" : u"N",
+                   biop->Media->LogicalPartition ? u"Y" : u"N",
+                   biop->Media->ReadOnly         ? u"Y" : u"N",
+                   biop->Media->WriteCaching     ? u"Y" : u"N",
+                   
+                   biop->Media->BlockSize,
+                   biop->Media->IoAlign,
+                   biop->Media->LastBlock,
+                   biop->Media->LowestAlignedLba,
+                   biop->Media->LogicalBlocksPerPhysicalBlock,
+                   biop->Media->OptimalTransferLengthGranularity);
+        
         // Print type of partition e.g. ESP or Data or Other
         if (!biop->Media->LogicalPartition) printf_c16(u"<Entire Disk>\r\n");
         else {
@@ -812,7 +812,7 @@ EFI_STATUS print_block_io_partitions(void){
                                       image,
                                       NULL,
                                       EFI_OPEN_PROTOCOL_GET_PROTOCOL);
-
+            
             if (EFI_ERROR(status)) {
                 printf_c16(u"Could not Open Partition Info protocol on handle %u.\r\n", i);
             } else {
@@ -831,10 +831,10 @@ EFI_STATUS print_block_io_partitions(void){
                 }
             }
         }
-
+        
         printf_c16(u"\r\n");    // Separate each block of text visually
     }
-
+    
     printf_c16(u"Press any key to go back..\r\n");
     get_key();
     return EFI_SUCCESS;
@@ -855,6 +855,104 @@ EFI_STATUS read_data_partition_file(void){
     printf_c16(u"HERE\r\n");
     get_key();
     return EFI_SUCCESS;
+}
+
+// =========================================================================
+// Load an ELF64 PIE file into a new buffer, and return the
+// entry point for the loaded ELF program
+// =========================================================================
+VOID *load_elf(VOID *elf_buffer) {
+    printf_c16(u"ELF64 PIE, Not implemented yet...\r\n");
+    
+    ELF_Header_64 *ehdr = elf_buffer;
+    
+    // Print elf header info for user
+    printf_c16(u"Type: %u, Machine: %x, Entry: %x\r\n"
+               u"Pgm headers offset: %u, Elf Header Size: %u\r\n"
+               u"Pgm entry size: %u, # of Pgm headers: %u\r\n",
+               ehdr->e_type, ehdr->e_machine, ehdr->e_entry,
+               ehdr->e_phoff, ehdr->e_ehsize,
+               ehdr->e_phentsize, ehdr->e_phnum);
+    
+    if (ehdr->e_type != ET_DYN) {
+        printf_c16(u"ELF is not a PIE file; e_type is not ETDYN/0x03\r\n");
+        return NULL;
+    }
+    
+    ELF_Program_Header_64 *phdr = (ELF_Program_Header_64 *)((UINT8 *)ehdr + ehdr->e_phoff);
+    printf_c16(u"Loadable Program Headers:\r\n");
+    
+    UINTN max_alignment = PAGE_SIZE;
+    UINTN mem_min = UINT64_MAX, mem_max = 0;
+    
+    for (UINT16 i = 0; i < ehdr->e_phnum; i++, phdr = (ELF_Program_Header_64 *)((UINT8 *)phdr + ehdr->e_phentsize)) {
+        if (phdr->p_type != PT_LOAD) continue;
+        
+        printf_c16(u"%u: Offset: %x, Vaddr: %x, Paddr: %x, FileSize: %x\r\n"
+                   u"    MemSize: %x, Alignment: %x\r\n",
+                   (UINTN)i, phdr->p_offset, phdr->p_vaddr, phdr->p_paddr,
+                   phdr->p_filesz, phdr->p_memsz, phdr->p_align);
+        
+        if (max_alignment < phdr->p_align) max_alignment = phdr->p_align;
+        
+        UINTN mem_begin = phdr->p_vaddr;
+        UINTN mem_end   = phdr->p_vaddr + phdr->p_memsz;
+        
+        mem_begin &= ~(max_alignment-1);
+        mem_end = (mem_end + max_alignment-1) & ~(max_alignment-1);
+        
+        if (mem_begin < mem_min) mem_min = mem_begin;
+        if (mem_end > mem_max) mem_max = mem_end;
+    }
+    
+    if (mem_min == UINT64_MAX || mem_max == 0 || mem_max <= mem_min) {
+        printf_c16(u"No loadable segments found or invalid memory range\r\n");
+        return NULL;
+    }
+    
+    UINTN max_memory_needed = mem_max - mem_min;
+    
+    printf_c16(u"\r\nMemory needed for file: %x\r\n", max_memory_needed);
+    
+    EFI_STATUS status = EFI_SUCCESS;
+    VOID *program_buffer = NULL;
+    status = bs->AllocatePool(EfiLoaderData, max_memory_needed, &program_buffer);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Error %x; Could not allocate memory for ELF program\r\n", status);
+        return NULL;
+    }
+    
+    // Initialize buffer to zeros
+    memset(program_buffer, max_memory_needed, 0);
+    
+    // Second pass: Load program segments into the allocated buffer
+    phdr = (ELF_Program_Header_64 *)((UINT8 *)ehdr + ehdr->e_phoff);
+    
+    for (UINT16 i = 0; i < ehdr->e_phnum; i++, phdr = (ELF_Program_Header_64 *)((UINT8 *)phdr + ehdr->e_phentsize)) {
+        if (phdr->p_type != PT_LOAD) continue;
+        
+        // Calculate relative offset from mem_min
+        UINTN relative_offset = phdr->p_vaddr - mem_min;
+        
+        // Destination in the newly allocated program buffer
+        UINT8 *dst = (UINT8 *)program_buffer + relative_offset;
+        // Source in the original ELF file buffer
+        UINT8 *src = (UINT8 *)elf_buffer + phdr->p_offset;
+        
+        UINT32 len = phdr->p_filesz;
+        // Copy p_filesz bytes from the ELF file to the program buffer
+        if (phdr->p_filesz > 0) {
+            memcpy(dst, src, len);
+            printf_c16(u"MEMCPY dst: %x, src: %x, len: %x\r\n", (UINTN)dst, (UINTN)src, phdr->p_filesz);
+        }
+    }
+    
+    // Calculate entry point relative to program_buffer
+    VOID *entry_point = (VOID *)((UINT8 *)program_buffer + (ehdr->e_entry - mem_min));
+    
+    printf_c16(u"ELF loaded. Entry point: %x\r\n", (UINTN)entry_point);
+    
+    return entry_point;
 }
 
 EFI_STATUS load_kernel(void) {
@@ -957,10 +1055,10 @@ EFI_STATUS load_kernel(void) {
     UINT8 *hdr = disk_buffer;
     
     printf_c16(u"Header bytes: [%x][%x][%x][%x]\r\n",hdr[0],hdr[1],hdr[2],hdr[3]);
-
+    
     if (!memcmp(hdr, (UINT8[4]){0x7F, 'E', 'L', 'F'}, 4)){
         printf_c16(u"ELF64 PIE, Not implementd yet...\r\n");
-        entry_point = disk_buffer;
+        entry_point = load_elf(disk_buffer);
     }else if (!memcmp(hdr, (UINT8[2]){'M', 'Z'}, 2)){
         printf_c16(u"PE32+ PIE, Not implementd yet...\r\n");
     }else{
@@ -970,8 +1068,8 @@ EFI_STATUS load_kernel(void) {
     // TODO: Load Kernel File depending on format (initial header bytes)
     printf_c16(u"Press any key to load kernel...\r\n");
     get_key();
-
-   // bs->CloseEvent(timer_event);
+    
+    // bs->CloseEvent(timer_event);
     
     entry_point(kparams);
     
@@ -983,7 +1081,7 @@ EFI_STATUS load_kernel(void) {
 cleanup:
     bs->FreePool(file_buffer);
     bs->FreePool(disk_buffer); // Free memory allocated for data partition file
-      
+    
 exit:
     printf_c16(u"Press any key to go back...\r\n");
     get_key();
@@ -1036,15 +1134,15 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
         cout->SetCursorPosition(cout, 0, 0);
         cout->SetAttribute(cout, EFI_TEXT_ATTR(HIGHLIGHT_FG_COLOR, HIGHLIGHT_BG_COLOR));
         printf_c16(u"%s", menu_choices[0]);
-
+        
         // Print rest of choices
         cout->SetAttribute(cout, EFI_TEXT_ATTR(DEFAULT_FG_COLOR, DEFAULT_BG_COLOR));
         for (UINTN i = 1; i < ARRAY_SIZE(menu_choices); i++)
             printf_c16(u"\r\n%s", menu_choices[i]);
-
+        
         // Get cursor row boundaries
         INTN max_row = cout->Mode->CursorRow;
-
+        
         // Input loop
         cout->SetCursorPosition(cout, 0, 0);
         
