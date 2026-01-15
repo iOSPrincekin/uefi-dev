@@ -30,6 +30,7 @@ int _fltused = 0;   // If using floating point code & lld-link, need to define t
 #define px_BLUE  {0x98,0x00,0x00,0x00}  // EFI_BLUE
 
 
+EFI_EVENT timer_event;  // Global timer event
 
 EFI_BOOT_SERVICES                         *bs;
 EFI_RUNTIME_SERVICES                      *rs;
@@ -1088,6 +1089,36 @@ exit:
     return EFI_SUCCESS;
 }
 
+// ===========================================================
+// Timer function to print current date/time every 1 second
+// ===========================================================
+VOID EFIAPI print_datetime(__attribute__((unused)) IN EFI_EVENT event, IN VOID *Context) {
+    Timer_Context context = *(Timer_Context *)Context;
+
+    // Save current cursor position before printing date/time
+    UINT32 save_col = cout->Mode->CursorColumn, save_row = cout->Mode->CursorRow;
+
+    // Get current date/time
+    EFI_TIME time;
+    EFI_TIME_CAPABILITIES capabilities;
+    rs->GetTime(&time, &capabilities);
+
+    // Move cursor to print in lower right corner
+    cout->SetCursorPosition(cout, context.cols-20, context.rows-1);
+
+    // Print current date/time
+    printf_c16(u"%u-%c%u-%c%u %c%u:%c%u:%c%u",
+           time.Year,
+           time.Month  < 10 ? u'0' : u'\0', time.Month,
+           time.Day    < 10 ? u'0' : u'\0', time.Day,
+           time.Hour   < 10 ? u'0' : u'\0', time.Hour,
+           time.Minute < 10 ? u'0' : u'\0', time.Minute,
+           time.Second < 10 ? u'0' : u'\0', time.Second);
+
+    // Restore cursor position
+    cout->SetCursorPosition(cout, save_col, save_row);
+}
+
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     
     init_global_varibles(ImageHandle,SystemTable);
@@ -1122,6 +1153,27 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
         
         UINTN cols = 0, rows = 0;
         cout->QueryMode(cout, cout->Mode->Mode, &cols, &rows);
+        
+        // Timer function context will be the text mode screen bounds
+        typedef struct {
+            UINT32 rows;
+            UINT32 cols;
+        } Timer_Context;
+
+        Timer_Context context = { .rows = rows, .cols = cols };
+
+        // Close Timer Event for cleanup
+        bs->CloseEvent(timer_event);
+
+        // Create timer event, to print date/time on screen every ~1second
+        bs->CreateEvent(EVT_TIMER | EVT_NOTIFY_SIGNAL,
+                        TPL_CALLBACK,
+                        print_datetime,
+                        (VOID *)&context,
+                        &timer_event);
+        
+        // Set Timer for the timer event to run every 1 second (in 100ns units)
+        bs->SetTimer(timer_event, TimerPeriodic, 10000000);
         
         // Print keybinds at bottom of screen
         cout->SetCursorPosition(cout, 0, rows-3);
