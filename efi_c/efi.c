@@ -956,6 +956,43 @@ VOID *load_elf(VOID *elf_buffer) {
     return entry_point;
 }
 
+EFI_STATUS get_memory_map(Memory_Map_Info *mmap){
+    EFI_STATUS status = EFI_SUCCESS;
+    memset(mmap, 0, sizeof *mmap);
+    status = bs->GetMemoryMap(&mmap->size,
+                              mmap->map,
+                              &mmap->key,
+                              &mmap->desc_size,
+                              &mmap->desc_version);
+    
+    if (EFI_ERROR(status) && status != EFI_BUFFER_TOO_SMALL){
+        printf_c16(u"Could not find or read data partition file to buffer\r\n");
+        return status;
+    }
+    
+    mmap->size += mmap->desc_size * 2;
+    status = bs->AllocatePool(EfiLoaderData, mmap->size, (VOID**)&mmap->map);
+    
+    if (EFI_ERROR(status)){
+        printf_c16(u"Error:%x,Could not allocate buffer for memory map\r\n",status);
+        return status;
+    }
+    
+    status = bs->GetMemoryMap(&mmap->size,
+                              mmap->map,
+                              &mmap->key,
+                              &mmap->desc_size,
+                              &mmap->desc_version);
+    
+    if (EFI_ERROR(status)){
+        printf_c16(u"Error %x,Could not get UEFI memory map!\r\n",status);
+        return status;
+    }
+    
+    
+    return EFI_SUCCESS;
+}
+
 EFI_STATUS load_kernel(void) {
     VOID *file_buffer = NULL;
     VOID *disk_buffer = NULL;
@@ -1033,7 +1070,7 @@ EFI_STATUS load_kernel(void) {
     
     
     typedef struct {
-        void *memory_map;
+        Memory_Map_Info mmap;
         EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE gop_mode;
     } Kernel_Params;
     
@@ -1059,19 +1096,32 @@ EFI_STATUS load_kernel(void) {
     
     if (!memcmp(hdr, (UINT8[4]){0x7F, 'E', 'L', 'F'}, 4)){
         printf_c16(u"ELF64 PIE, Not implementd yet...\r\n");
-        entry_point = load_elf(disk_buffer);
+        entry_point = (void EFIAPI (*)(Kernel_Params))load_elf(disk_buffer);
     }else if (!memcmp(hdr, (UINT8[2]){'M', 'Z'}, 2)){
         printf_c16(u"PE32+ PIE, Not implementd yet...\r\n");
     }else{
         printf_c16(u"No header bytes, Assuming it's a flat binary file\r\n");
-        entry_point = disk_buffer;
+        entry_point = (void EFIAPI (*)(Kernel_Params))disk_buffer;
     }
     // TODO: Load Kernel File depending on format (initial header bytes)
     printf_c16(u"Press any key to load kernel...\r\n");
     get_key();
     
-    // bs->CloseEvent(timer_event);
+    bs->CloseEvent(timer_event);
     
+    status = get_memory_map(&kparams.mmap);
+    printf_c16(u"get_memory_map: %u\r\n",status);
+    // Get Memory Map
+    if (EFI_ERROR(status)){
+        goto cleanup;
+    }
+    
+    // TODO: Exit boot services before calling kernel
+    status = bs->ExitBootServices(image, kparams.mmap.key);
+    printf_c16(u"bs->ExitBootServices: %u\r\n",status);
+    if (EFI_ERROR(status)){
+        goto cleanup;
+    }
     entry_point(kparams);
     
     __builtin_unreachable();
@@ -1119,6 +1169,54 @@ VOID EFIAPI print_datetime(__attribute__((unused)) IN EFI_EVENT event, IN VOID *
     cout->SetCursorPosition(cout, save_col, save_row);
 }
 
+EFI_STATUS print_memory_map(void){
+    cout->ClearScreen(cout);
+    
+    Memory_Map_Info mmap;
+    get_memory_map(&mmap);
+    
+    
+    printf_c16(u"EFI_MEMORY_DESCRIPTOR size: %u\r\n",sizeof(EFI_MEMORY_DESCRIPTOR));
+    
+    printf_c16(u"Memory map: Size %u, Descriptor size: %u, # of descriptors: %u, key: %x\r\n",
+               mmap.size, mmap.desc_size, mmap.size / mmap.desc_size, mmap.key);
+    
+    UINT32 usable_bytes = 0;
+    for (UINTN i = 0; i < mmap.size / mmap.desc_size; i++){
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8*)mmap.map + (i * mmap.desc_size));
+        printf_c16(u"%u: Typ: %u, Phy: %x, Vrt: %x, Pgs: %u, Att: %x\r\n",
+                   i,
+                   desc->Type,
+                   desc->PhysicalStart,
+                   desc->VirtualStart,
+                   desc->NumberOfPages,
+                   desc->Attribute);
+        
+        if (desc->Type == EfiLoaderCode         ||
+            desc->Type == EfiLoaderData         ||
+            desc->Type == EfiBootServicesCode   ||
+            desc->Type == EfiBootServicesData   ||
+            desc->Type == EfiConventionalMemory ||
+            desc->Type == EfiPersistentMemory) {
+            
+            usable_bytes += desc->NumberOfPages * 4096;
+        }
+        if (i > 0 && i % 20 == 0){
+            get_key();
+        }
+    }
+    
+    printf_c16(u"\r\nUsable memory: %u / %u MiB / %u GiB\r\n",
+               usable_bytes,
+               usable_bytes / (1024 * 1024),
+               usable_bytes / (1024 * 1024 * 1024));
+    
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    get_key();
+    return EFI_SUCCESS;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     
     init_global_varibles(ImageHandle,SystemTable);
@@ -1137,7 +1235,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             u"Read ESP Files",
             u"Print Block IO Paritions",
             u"Read Data Partition File",
-            u"Load Kernel"
+            u"Load Kernel",
+            u"Print Memory Map"
         };
         
         EFI_STATUS (*menu_funcs[])(void) = {
@@ -1147,7 +1246,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             read_esp_files,
             print_block_io_partitions,
             read_data_partition_file,
-            load_kernel
+            load_kernel,
+            print_memory_map
         };
         cout->ClearScreen(cout);
         
