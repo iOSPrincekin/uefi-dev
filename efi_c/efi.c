@@ -993,6 +993,59 @@ EFI_STATUS get_memory_map(Memory_Map_Info *mmap){
     return EFI_SUCCESS;
 }
 
+EFI_STATUS print_memory_map_with(Memory_Map_Info mmap){
+    cout->ClearScreen(cout);
+    
+    
+    printf_c16(u"EFI_MEMORY_DESCRIPTOR size: %u\r\n",sizeof(EFI_MEMORY_DESCRIPTOR));
+    
+    printf_c16(u"Memory map: Size %u, Descriptor size: %u, # of descriptors: %u, key: %x\r\n",
+               mmap.size, mmap.desc_size, mmap.size / mmap.desc_size, mmap.key);
+    
+    UINT32 usable_bytes = 0;
+    for (UINTN i = 0; i < mmap.size / mmap.desc_size; i++){
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8*)mmap.map + (i * mmap.desc_size));
+        printf_c16(u"%u: Typ: %u, Phy: %x, Vrt: %x, Pgs: %u, Att: %x\r\n",
+                   i,
+                   desc->Type,
+                   desc->PhysicalStart,
+                   desc->VirtualStart,
+                   desc->NumberOfPages,
+                   desc->Attribute);
+        
+        if (desc->Type == EfiLoaderCode         ||
+            desc->Type == EfiLoaderData         ||
+            desc->Type == EfiBootServicesCode   ||
+            desc->Type == EfiBootServicesData   ||
+            desc->Type == EfiConventionalMemory ||
+            desc->Type == EfiPersistentMemory) {
+            
+            usable_bytes += desc->NumberOfPages * 4096;
+        }
+        if (i > 0 && i % 20 == 0){
+            get_key();
+        }
+    }
+    
+    printf_c16(u"\r\nUsable memory: %u / %u MiB / %u GiB\r\n",
+               usable_bytes,
+               usable_bytes / (1024 * 1024),
+               usable_bytes / (1024 * 1024 * 1024));
+    
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    get_key();
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS print_memory_map(void){
+    
+    Memory_Map_Info mmap;
+    get_memory_map(&mmap);
+    
+    return print_memory_map_with(mmap);
+}
+
 EFI_STATUS load_kernel(void) {
     VOID *file_buffer = NULL;
     VOID *disk_buffer = NULL;
@@ -1109,6 +1162,10 @@ EFI_STATUS load_kernel(void) {
     
     bs->CloseEvent(timer_event);
     
+//#define USE_MEMORY_MAP
+    
+#ifdef USE_MEMORY_MAP
+    
     status = get_memory_map(&kparams.mmap);
     printf_c16(u"get_memory_map: %u\r\n",status);
     // Get Memory Map
@@ -1116,12 +1173,15 @@ EFI_STATUS load_kernel(void) {
         goto cleanup;
     }
     
+    print_memory_map_with(kparams.mmap);
     // TODO: Exit boot services before calling kernel
     status = bs->ExitBootServices(image, kparams.mmap.key);
     printf_c16(u"bs->ExitBootServices: %u\r\n",status);
     if (EFI_ERROR(status)){
         goto cleanup;
     }
+#endif
+    
     entry_point(kparams);
     
     __builtin_unreachable();
@@ -1135,7 +1195,8 @@ cleanup:
     
 exit:
     printf_c16(u"Press any key to go back...\r\n");
-    get_key();
+    EFI_INPUT_KEY key = get_key();
+    printf_c16(u"key.ScanCode:%u",key.ScanCode);
     return EFI_SUCCESS;
 }
 
@@ -1167,54 +1228,6 @@ VOID EFIAPI print_datetime(__attribute__((unused)) IN EFI_EVENT event, IN VOID *
 
     // Restore cursor position
     cout->SetCursorPosition(cout, save_col, save_row);
-}
-
-EFI_STATUS print_memory_map(void){
-    cout->ClearScreen(cout);
-    
-    Memory_Map_Info mmap;
-    get_memory_map(&mmap);
-    
-    
-    printf_c16(u"EFI_MEMORY_DESCRIPTOR size: %u\r\n",sizeof(EFI_MEMORY_DESCRIPTOR));
-    
-    printf_c16(u"Memory map: Size %u, Descriptor size: %u, # of descriptors: %u, key: %x\r\n",
-               mmap.size, mmap.desc_size, mmap.size / mmap.desc_size, mmap.key);
-    
-    UINT32 usable_bytes = 0;
-    for (UINTN i = 0; i < mmap.size / mmap.desc_size; i++){
-        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8*)mmap.map + (i * mmap.desc_size));
-        printf_c16(u"%u: Typ: %u, Phy: %x, Vrt: %x, Pgs: %u, Att: %x\r\n",
-                   i,
-                   desc->Type,
-                   desc->PhysicalStart,
-                   desc->VirtualStart,
-                   desc->NumberOfPages,
-                   desc->Attribute);
-        
-        if (desc->Type == EfiLoaderCode         ||
-            desc->Type == EfiLoaderData         ||
-            desc->Type == EfiBootServicesCode   ||
-            desc->Type == EfiBootServicesData   ||
-            desc->Type == EfiConventionalMemory ||
-            desc->Type == EfiPersistentMemory) {
-            
-            usable_bytes += desc->NumberOfPages * 4096;
-        }
-        if (i > 0 && i % 20 == 0){
-            get_key();
-        }
-    }
-    
-    printf_c16(u"\r\nUsable memory: %u / %u MiB / %u GiB\r\n",
-               usable_bytes,
-               usable_bytes / (1024 * 1024),
-               usable_bytes / (1024 * 1024 * 1024));
-    
-    
-    printf_c16(u"\r\nPress any key to go back...\r\n");
-    get_key();
-    return EFI_SUCCESS;
 }
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
