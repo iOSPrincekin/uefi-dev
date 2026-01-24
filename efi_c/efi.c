@@ -30,14 +30,18 @@ int _fltused = 0;   // If using floating point code & lld-link, need to define t
 #define px_BLUE  {0x98,0x00,0x00,0x00}  // EFI_BLUE
 
 
-EFI_EVENT timer_event;  // Global timer event
-
 EFI_BOOT_SERVICES                         *bs;
 EFI_RUNTIME_SERVICES                      *rs;
+EFI_SYSTEM_TABLE                          *st;
+
+EFI_EVENT timer_event;  // Global timer event
+
+Page_Table *pml4;
 
 void init_global_varibles(EFI_HANDLE handle, EFI_SYSTEM_TABLE *systable){
     cout = systable->ConOut;
     cin = systable->ConIn;
+    st = systable;
     bs = systable->BootServices;
     rs = systable->RuntimeServices;
     image = handle;
@@ -862,7 +866,7 @@ EFI_STATUS read_data_partition_file(void){
 // Load an ELF64 PIE file into a new buffer, and return the
 // entry point for the loaded ELF program
 // =========================================================================
-VOID *load_elf(VOID *elf_buffer) {
+VOID *load_elf(VOID *elf_buffer, EFI_PHYSICAL_ADDRESS *kernel_buffer, UINTN *kernel_size) {
     printf_c16(u"ELF64 PIE, Not implemented yet...\r\n");
     
     ELF_Header_64 *ehdr = elf_buffer;
@@ -916,15 +920,19 @@ VOID *load_elf(VOID *elf_buffer) {
     printf_c16(u"\r\nMemory needed for file: %x\r\n", max_memory_needed);
     
     EFI_STATUS status = EFI_SUCCESS;
-    VOID *program_buffer = NULL;
-    status = bs->AllocatePool(EfiLoaderData, max_memory_needed, &program_buffer);
+    EFI_PHYSICAL_ADDRESS program_buffer = 0;
+    UINTN pages_needed = (max_memory_needed + (PAGE_SIZE - 1)) / PAGE_SIZE;
+    status = bs->AllocatePages(AllocateAnyPages, EfiLoaderCode, pages_needed, &program_buffer);
     if (EFI_ERROR(status)) {
         printf_c16(u"Error %x; Could not allocate memory for ELF program\r\n", status);
         return NULL;
     }
     
     // Initialize buffer to zeros
-    memset(program_buffer, max_memory_needed, 0);
+    memset((VOID *)program_buffer, 0, max_memory_needed);
+    
+    *kernel_buffer = program_buffer;
+    *kernel_size = pages_needed * PAGE_SIZE;
     
     // Second pass: Load program segments into the allocated buffer
     phdr = (ELF_Program_Header_64 *)((UINT8 *)ehdr + ehdr->e_phoff);
@@ -1046,6 +1054,148 @@ EFI_STATUS print_memory_map(void){
     return print_memory_map_with(mmap);
 }
 
+void* mmap_allocate_pages2(Memory_Map_Info *mmap, UINTN pages) {
+    static void *next_page_address = NULL;  // Next page/page range address to return to caller
+    static UINTN current_descriptor = 0;    // Current descriptor number
+    static UINTN remaining_pages = 0;       // Remaining pages in current descriptor
+    
+    if (remaining_pages < pages) {
+        // Not enough remaining pages in current descriptor, find the next available one
+        UINTN i = current_descriptor + 1;
+        for (; i < mmap->size / mmap->desc_size; i++) {
+            EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *) ((UINT8 *)mmap->map + (i * mmap->desc_size));
+            
+            if (desc->Type == EfiConventionalMemory && desc->NumberOfPages >= pages) {
+                // Found enough memory to use at this descriptor, use it
+                current_descriptor = i;
+                remaining_pages = desc->NumberOfPages - pages;
+                next_page_address = (void *)(desc->PhysicalStart + pages * PAGE_SIZE);
+                return (void *) desc->PhysicalStart;
+            }
+        }
+        
+        if (i >= mmap->size / mmap->desc_size) {
+            // Ran out of descriptors to check in memory map
+            printf_c16(u"\r\nERROR: Could not find any memory to allocate pages for.\r\n");
+            return NULL;
+        }
+    }
+    
+    // Else we have at least enough pages for this allocation, return the current spot in the memory map
+    remaining_pages -= pages;
+    void *page = next_page_address;
+    next_page_address = (void *)((UINT8 *)page + (pages * PAGE_SIZE));
+    return page;
+}
+
+bool map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mmap){
+    int flags = PRESENT | READWRITE | USER;    // 0b111
+    
+    UINTN pml4_index = ((virtual_address) >> 39) & 0x1FF;
+    UINTN pdpt_index = ((virtual_address) >> 30) & 0x1FF;
+    UINTN pdt_index  = ((virtual_address) >> 21) & 0x1FF;
+    UINTN pt_index   = ((virtual_address) >> 12) & 0x1FF;
+    
+    // Make sure pdpt exists, if not then allocate it
+    if (!(pml4->entries[pml4_index] & PRESENT)) {
+        void *pdpt_address = mmap_allocate_pages2(mmap, 1);
+        
+        memset(pdpt_address, 0, sizeof(Page_Table));
+        pml4->entries[pml4_index] = (UINTN)pdpt_address | flags;
+    }
+    
+    Page_Table *pdpt = (Page_Table*)(pml4->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    if (!(pdpt->entries[pdpt_index] & PRESENT)){
+        void *pdt_address = mmap_allocate_pages2(mmap, 1);
+        
+        memset(pdt_address, 0, sizeof(Page_Table));
+        pml4->entries[pdpt_index] = (UINTN)pdt_address | flags;
+    }
+    
+    Page_Table *pdt = (Page_Table*)(pdpt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    if (!(pdt->entries[pdt_index] & PRESENT)){
+        void *pt_address = mmap_allocate_pages2(mmap, 1);
+        
+        memset(pt_address, 0, sizeof(Page_Table));
+        pml4->entries[pdt_index] = (UINTN)pt_address | flags;
+    }
+    
+    Page_Table *pt = (Page_Table*)(pdt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    if (!(pt->entries[pt_index] & PRESENT)) {
+        pt->entries[pt_index] = (physical_address & PHYS_PAGE_ADDR_MASK) | flags;
+    }
+}
+
+void unmap_page(UINTN virtual_address, Memory_Map_Info *mmap) {
+    UINTN pml4_index = ((virtual_address) >> 39) & 0x1FF;
+    UINTN pdpt_index = ((virtual_address) >> 30) & 0x1FF;
+    UINTN pdt_index  = ((virtual_address) >> 21) & 0x1FF;
+    UINTN pt_index   = ((virtual_address) >> 12) & 0x1FF;
+    
+    Page_Table *pdpt = (Page_Table*)(pml4->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    Page_Table *pdt = (Page_Table*)(pdpt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    Page_Table *pt = (Page_Table*)(pdt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
+    
+    pt->entries[pt_index] = 0;
+    
+    __asm__ __volatile__("invlpg (%0)\n" : : "r"(virtual_address));
+}
+
+void identiy_map_efi_mmap(Memory_Map_Info *mmap){
+    for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++) {
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+        
+        for (UINTN j = 0; j < desc->NumberOfPages; j++) {
+            identity_map_page(desc->PhysicalStart + (j * PAGE_SIZE), mmap);
+        }
+    }
+}
+
+void set_runtime_address_map2(Memory_Map_Info* mmap){
+    UINTN runtime_descriptors = 0;
+    for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++) {
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)mmap->map + (i * mmap->desc_size));
+        
+        if (desc->Attribute & EFI_MEMORY_RUNTIME) {
+            runtime_descriptors++;
+        }
+    }
+    
+    UINTN runtime_mmap_pages = (runtime_descriptors * mmap->desc_size) + ((PAGE_SIZE -1) / PAGE_SIZE);
+    EFI_MEMORY_DESCRIPTOR *runtime_mmap = mmap_allocate_pages(mmap, runtime_mmap_pages);
+    if (!runtime_mmap){
+        printf_c16(u"ERROR: could not allocate runtime descriptors memory map\r\n");
+        return;
+    }
+    
+    UINTN runtime_mmap_size = runtime_mmap_pages / PAGE_SIZE;
+    memset(runtime_mmap, 0, runtime_mmap_size);
+    
+    
+    UINTN curr_runtime_desc = 0;
+    for (UINTN i = 0; i < mmap->size / mmap->desc_size; i++) {
+        EFI_MEMORY_DESCRIPTOR *desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8*)mmap->map + (i * mmap->desc_size));
+        
+        if (desc->Attribute & EFI_MEMORY_RUNTIME) {
+            EFI_MEMORY_DESCRIPTOR *runtime_desc = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)runtime_mmap + (curr_runtime_desc * mmap->desc_size));
+            
+            memcpy(runtime_desc, desc, sizeof *desc);
+            runtime_desc->VirtualStart = runtime_desc->PhysicalStart;
+            curr_runtime_desc++;
+        }
+    }
+    
+    
+    EFI_STATUS status = rs->SetVirtualAddressMap(runtime_mmap_size,
+                                                 mmap->desc_size,
+                                                 mmap->desc_version,
+                                                 runtime_mmap);
+    
+    if (EFI_ERROR(status)){
+        printf_c16(u"ERROR: SetVirtualAddressMap()\r\n");
+    }
+}
+
 EFI_STATUS load_kernel(void) {
     VOID *file_buffer = NULL;
     VOID *disk_buffer = NULL;
@@ -1060,7 +1210,7 @@ EFI_STATUS load_kernel(void) {
     UINTN buf_size = 0;
     file_buffer = read_esp_file_to_buffer(file_name, &buf_size);
     if (!file_buffer) {
-        printf_c16(0, u"Could not find or read file '%s' to buffer\r\n", file_name);
+        printf_c16(u"Could not find or read file '%s' to buffer\r\n", file_name);
         goto exit;
     }
     
@@ -1068,14 +1218,14 @@ EFI_STATUS load_kernel(void) {
     char *str_pos = NULL;
     str_pos = strstr(file_buffer, "kernel");
     if (!str_pos) {
-        printf_c16(0, u"Could not find kernel file in data partition\r\n");
+        printf_c16(u"Could not find kernel file in data partition\r\n");
         goto cleanup;
     }
     printf_c16(u"Found kernel file\r\n");
     
     str_pos = strstr(file_buffer, "FILE_SIZE=");
     if (!str_pos) {
-        printf_c16(0, u"Could not find file size from buffer for '%s'\r\n", file_name);
+        printf_c16(u"Could not find file size from buffer for '%s'\r\n", file_name);
         goto cleanup;
     }
     
@@ -1090,7 +1240,7 @@ EFI_STATUS load_kernel(void) {
     
     str_pos = strstr(file_buffer, "DISK_LBA=");
     if (!str_pos) {
-        printf_c16(0, u"Could not find disk lba value from buffer for '%s'\r\n", file_name);
+        printf_c16(u"Could not find disk lba value from buffer for '%s'\r\n", file_name);
         goto cleanup;
     }
     
@@ -1116,7 +1266,7 @@ EFI_STATUS load_kernel(void) {
     // Read disk lbas for file into buffer
     disk_buffer = (VOID *)read_disk_lbas_to_buffer(disk_lba, file_size, image_mediaID, false);
     if (!disk_buffer) {
-        printf_c16(0, u"Could not find or read data partition file to buffer\r\n");
+        printf_c16(u"Could not find or read data partition file to buffer\r\n");
         bs->FreePool(file_buffer); // Free memory allocated for ESP file
         goto exit;
     }
@@ -1125,6 +1275,9 @@ EFI_STATUS load_kernel(void) {
     typedef struct {
         Memory_Map_Info mmap;
         EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE gop_mode;
+        EFI_RUNTIME_SERVICES              *RuntimeServices;
+        UINTN                             NumberOfTableEntries;
+        EFI_CONFIGURATION_TABLE           *ConfigurationTable;
     } Kernel_Params;
     
     Kernel_Params kparams = {0};
@@ -1147,41 +1300,95 @@ EFI_STATUS load_kernel(void) {
     
     printf_c16(u"Header bytes: [%x][%x][%x][%x]\r\n",hdr[0],hdr[1],hdr[2],hdr[3]);
     
+    EFI_PHYSICAL_ADDRESS kernel_buffer = 0;
+    UINTN kernel_size = 0;
+    
     if (!memcmp(hdr, (UINT8[4]){0x7F, 'E', 'L', 'F'}, 4)){
         printf_c16(u"ELF64 PIE, Not implementd yet...\r\n");
-        entry_point = (void EFIAPI (*)(Kernel_Params))load_elf(disk_buffer);
+        entry_point = (void EFIAPI (*)(Kernel_Params))load_elf(disk_buffer, &kernel_buffer, &kernel_size);
     }else if (!memcmp(hdr, (UINT8[2]){'M', 'Z'}, 2)){
         printf_c16(u"PE32+ PIE, Not implementd yet...\r\n");
     }else{
         printf_c16(u"No header bytes, Assuming it's a flat binary file\r\n");
+        // Flat binary executable code assumed to start at the beginning of the loaded buffer
         entry_point = (void EFIAPI (*)(Kernel_Params))disk_buffer;
+        kernel_buffer = (EFI_PHYSICAL_ADDRESS)disk_buffer;
+        kernel_size = file_size;
     }
+    
+    // DEBUGGING
+    printf_c16(u"\r\nKernel address: %x, size: %u, entry point: %x\r\n",
+               kernel_buffer, kernel_size, (UINTN)entry_point);
+    
+    if (!entry_point) goto cleanup;
+    
     // TODO: Load Kernel File depending on format (initial header bytes)
     printf_c16(u"Press any key to load kernel...\r\n");
     get_key();
     
     bs->CloseEvent(timer_event);
     
-//#define USE_MEMORY_MAP
+#define USE_MEMORY_MAP
     
 #ifdef USE_MEMORY_MAP
     
     status = get_memory_map(&kparams.mmap);
-    printf_c16(u"get_memory_map: %u\r\n",status);
-    // Get Memory Map
     if (EFI_ERROR(status)){
         goto cleanup;
     }
     
-    print_memory_map_with(kparams.mmap);
+    //   print_memory_map_with(kparams.mmap);
     // TODO: Exit boot services before calling kernel
+    UINTN retries = 0;
+    const UINTN MAX_RETRIES = 5;
     status = bs->ExitBootServices(image, kparams.mmap.key);
-    printf_c16(u"bs->ExitBootServices: %u\r\n",status);
-    if (EFI_ERROR(status)){
+    // printf_c16(u"bs->ExitBootServices: %u\r\n",status);
+    if (EFI_ERROR(status) && retries < MAX_RETRIES){
+        
+        bs->FreePool(kparams.mmap.map);
+        status = get_memory_map(&kparams.mmap);
+        if (EFI_ERROR(status)){
+            goto cleanup;
+        }
+        retries++;
+    }
+    
+    if (retries == MAX_RETRIES){
+        printf_c16(u"Error: Could not find Exit Services!\r\n");
         goto cleanup;
     }
 #endif
     
+    kparams.RuntimeServices = rs;
+    kparams.NumberOfTableEntries = st->NumberOfTableEntries;
+    kparams.ConfigurationTable = st->ConfigurationTable;
+    
+#if 1
+    pml4 = mmap_allocate_pages2(&kparams.mmap, 1);
+    
+    identity_map_efi_mmap(&kparams.mmap);
+    
+    set_runtime_address_map2(&kparams.mmap);
+    
+    // TODO: Remap kernel to higher address
+    // including entry point (and kparams?)
+    
+    // TODO: Identity map framebuffer
+    
+    // TODO: Identity map new stack for kernel
+    
+    // TODO: Set up new GDT & TSS
+    
+    // Clear interrupts before setting up new GDT/paging/etc.
+    __asm__ __volatile__("cli");
+    
+    // TODO: Set new page tables (CR3 = PML4) and GDT (lgdt && ltr), and call entry point with params
+    
+    // TODO: Test calling PE, ELF, and flat bin kernels/entry points
+    
+#endif
+    
+    // Call the kernel/OS here, Fully in control now, not in EFI anymore!
     entry_point(kparams);
     
     __builtin_unreachable();
@@ -1205,30 +1412,159 @@ exit:
 // ===========================================================
 VOID EFIAPI print_datetime(__attribute__((unused)) IN EFI_EVENT event, IN VOID *Context) {
     Timer_Context context = *(Timer_Context *)Context;
-
+    
     // Save current cursor position before printing date/time
     UINT32 save_col = cout->Mode->CursorColumn, save_row = cout->Mode->CursorRow;
-
+    
     // Get current date/time
     EFI_TIME time;
     EFI_TIME_CAPABILITIES capabilities;
     rs->GetTime(&time, &capabilities);
-
+    
     // Move cursor to print in lower right corner
     cout->SetCursorPosition(cout, context.cols-20, context.rows-1);
-
+    
     // Print current date/time
     printf_c16(u"%u-%c%u-%c%u %c%u:%c%u:%c%u",
-           time.Year,
-           time.Month  < 10 ? u'0' : u'\0', time.Month,
-           time.Day    < 10 ? u'0' : u'\0', time.Day,
-           time.Hour   < 10 ? u'0' : u'\0', time.Hour,
-           time.Minute < 10 ? u'0' : u'\0', time.Minute,
-           time.Second < 10 ? u'0' : u'\0', time.Second);
-
+               time.Year,
+               time.Month  < 10 ? u'0' : u'\0', time.Month,
+               time.Day    < 10 ? u'0' : u'\0', time.Day,
+               time.Hour   < 10 ? u'0' : u'\0', time.Hour,
+               time.Minute < 10 ? u'0' : u'\0', time.Minute,
+               time.Second < 10 ? u'0' : u'\0', time.Second);
+    
     // Restore cursor position
     cout->SetCursorPosition(cout, save_col, save_row);
 }
+
+
+
+
+
+typedef struct {
+    UINT8  signature[4];
+    UINT32 length;
+    UINT8  revision;
+    UINT8  checksum;
+    UINT8  OEMID[6];
+    UINT8  OEM_table_id[8];
+    UINT32 OEM_revision;
+    UINT32 creator_id;
+    UINT32 creator_revision;
+} __attribute__((packed)) ACPI_Description_Header;
+
+EFI_STATUS print_config_tables(void){
+    cout->ClearScreen(cout);
+    
+    bs->CloseEvent(timer_event);
+    
+    printf_c16(u"Configuration Table GUIDs:\r\n");
+    
+    for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
+        print_guid(st->ConfigurationTable[i].VendorGuid);
+        printf_c16(u"\r\n");
+    }
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    
+    get_key();
+    
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS print_acpi_tables(void) {
+    cout->ClearScreen(cout);
+    
+    bs->CloseEvent(timer_event);
+    
+    EFI_GUID acpi_guid = EFI_ACPI_TABLE_GUID;
+    VOID *rsdp_ptr = get_config_table_by_guid(acpi_guid);
+    bool acpi_20 = false;
+    if (!rsdp_ptr){
+        
+        acpi_guid = (EFI_GUID)ACPI_TABLE_GUID;
+        VOID *rsdp_ptr = get_config_table_by_guid(acpi_guid);
+        
+        if (!rsdp_ptr){
+            // Check for ACPI 1.0 table as fallback
+            printf_c16(u"Error: Could not find ACPI configuration table\r\n");
+            return 1;
+        }else{
+            printf_c16(u"ACPI 1.0 Table found at %x\r\n",rsdp_ptr);
+        }
+    }else{
+        printf_c16(u"ACPI 2.0 Table found at %x\r\n",rsdp_ptr);
+        acpi_20 = true;
+    }
+    
+    
+    
+    UINT8 *rsdp = rsdp_ptr;
+    if(acpi_20){
+        printf_c16(u"RSDP:\r\n"
+                   u"Signature: %c%c%c%c%c%c%c%c\r\n"
+                   u"Checksum: %u\r\n"
+                   u"OEMID: %c%c%c%c%c%c\r\n"
+                   u"RSDT Address: %x\r\n"
+                   u"Length: %u\r\n"
+                   u"XSDT Address: %x\r\n"
+                   u"Extended Checksum: %u\r\n",
+                   rsdp[0],rsdp[1],rsdp[2],rsdp[3],rsdp[4],rsdp[5],rsdp[6],rsdp[7],
+                   (UINTN)rsdp[8],
+                   rsdp[9],rsdp[10],rsdp[11],rsdp[12],rsdp[13],rsdp[14],
+                   *(UINT32 *)&rsdp[16],
+                   *(UINT32 *)&rsdp[20],
+                   *(UINT32 *)&rsdp[24],
+                   *(UINT32 *)&rsdp[32]
+                   );
+    }else{
+        printf_c16(u"RSDP:\r\n"
+                   u"Signature: %c%c%c%c%c%c%c%c\r\n"
+                   u"Checksum: %u\r\n"
+                   u"OEMID: %c%c%c%c%c%c\r\n"
+                   u"RSDT Address: %x\r\n",
+                   rsdp[0],rsdp[1],rsdp[2],rsdp[3],rsdp[4],rsdp[5],rsdp[6],rsdp[7],
+                   (UINTN)rsdp[8],
+                   rsdp[9],rsdp[10],rsdp[11],rsdp[12],rsdp[13],rsdp[14],
+                   *(UINT32 *)&rsdp[16]
+                   );
+    }
+    
+    printf_c16(u"\r\nPress any key to print RSDT/XSDT...\r\n");
+    get_key();
+    
+    ACPI_Description_Header *header = NULL;
+    UINT64 xsdt_address = *(UINT64 *)&rsdp[24];
+    if (acpi_20) {
+        // Print XSDT header
+        header = (ACPI_Description_Header *)(UINTN)xsdt_address;
+        printf_c16(u"\r\nXSDT @ %x\r\n", (UINTN)header);
+        print_acpi_table_header(*(ACPI_TABLE_HEADER *)header);
+        
+        // Print XSDT entries (each entry is a 64-bit physical address)
+        printf_c16(u"\r\nPress any key to print entries...\r\n");
+        get_key();
+        
+        printf_c16(u"Entries:\r\n");
+        UINT64 *entry = (UINT64 *)((UINT8 *)header + sizeof(*header));
+        for (UINTN i = 0; i < (header->length - sizeof(*header)) / 8; i++) {
+            ACPI_Description_Header *table_header = (ACPI_Description_Header *)(UINTN)entry[i];
+            printf_c16(u"%c%c%c%c\r\n",
+                       table_header->signature[0], table_header->signature[1],
+                       table_header->signature[2], table_header->signature[3]);
+            // TODO: Print more than only the signature
+        }
+    } else {
+        // TODO: Print RSDT header & entries (32-bit pointers)
+        printf_c16(u"\r\nACPI 1.0 detected; RSDT parsing not implemented yet.\r\n");
+    }
+    
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    get_key();
+    return EFI_SUCCESS;
+}
+
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     
@@ -1249,7 +1585,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             u"Print Block IO Paritions",
             u"Read Data Partition File",
             u"Load Kernel",
-            u"Print Memory Map"
+            u"Print Memory Map",
+            u"Print Config Tables",
+            u"Print ACPI Tables"
         };
         
         EFI_STATUS (*menu_funcs[])(void) = {
@@ -1260,7 +1598,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             print_block_io_partitions,
             read_data_partition_file,
             load_kernel,
-            print_memory_map
+            print_memory_map,
+            print_config_tables,
+            print_acpi_tables
         };
         cout->ClearScreen(cout);
         
@@ -1272,12 +1612,12 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             UINT32 rows;
             UINT32 cols;
         } Timer_Context;
-
+        
         Timer_Context context = { .rows = rows, .cols = cols };
-
+        
         // Close Timer Event for cleanup
         bs->CloseEvent(timer_event);
-
+        
         // Create timer event, to print date/time on screen every ~1second
         bs->CreateEvent(EVT_TIMER | EVT_NOTIFY_SIGNAL,
                         TPL_CALLBACK,

@@ -152,6 +152,35 @@ kernel.binpe: $(KERNEL_SRC)
 
 -include $(DEPENDS)
 
+# Debug target: start QEMU with GDB server and connect lldb
+QEMU_DEBUG_SCRIPT := ./qemu_$(ARCH)_debug.sh
+
+debug: $(OVMF) $(EFI_APP) $(KERNEL) $(DISK_IMG_FOLDER)/$(DISK_IMG_PGM)
+	$(ADD_KERNEL)
+	@if [ ! -f $(DISK_IMG_FOLDER)/test.hdd ]; then \
+		echo "Error: test.hdd was not created. Please check write_gpt output above."; \
+		exit 1; \
+	fi
+	@echo "=========================================="
+	@echo "Starting QEMU with GDB server (port 1234)..."
+	@echo "QEMU will pause at startup, waiting for debugger."
+	@echo "=========================================="
+	@$(QEMU_DEBUG_SCRIPT) &
+	@sleep 2
+	@echo ""
+	@echo "Connecting lldb to QEMU GDB server..."
+	@echo "Loading symbols from: $(EFI_APP)"
+	@echo ""
+	@echo "Useful lldb commands:"
+	@echo "  (lldb) breakpoint set --name efi_main"
+	@echo "  (lldb) breakpoint set --name load_kernel"
+	@echo "  (lldb) continue"
+	@echo "  (lldb) step"
+	@echo "  (lldb) print variable_name"
+	@echo "=========================================="
+	@lldb -o "file $(EFI_APP)" \
+		-o "gdb-remote localhost:1234"
+
 clean:
 	rm -rf $(EFI_APP) $(KERNEL) [!bios]*.bin* *.d *.efi *.EFI *.elf *.o *.obj *.pe
 
