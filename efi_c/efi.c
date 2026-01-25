@@ -29,6 +29,9 @@ int _fltused = 0;   // If using floating point code & lld-link, need to define t
 #define px_BLACK {0x00,0x00,0x00,0x00}
 #define px_BLUE  {0x98,0x00,0x00,0x00}  // EFI_BLUE
 
+// Kernel start address in higher memory (64-bit) - last 2 GiBs of virtual memory
+#define KERNEL_START_ADDRESS 0xFFFFFFFF80000000
+
 
 EFI_BOOT_SERVICES                         *bs;
 EFI_RUNTIME_SERVICES                      *rs;
@@ -1109,7 +1112,7 @@ bool map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mm
         void *pdt_address = mmap_allocate_pages2(mmap, 1);
         
         memset(pdt_address, 0, sizeof(Page_Table));
-        pml4->entries[pdpt_index] = (UINTN)pdt_address | flags;
+        pdpt->entries[pdpt_index] = (UINTN)pdt_address | flags;
     }
     
     Page_Table *pdt = (Page_Table*)(pdpt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
@@ -1117,7 +1120,7 @@ bool map_page(UINTN physical_address, UINTN virtual_address, Memory_Map_Info *mm
         void *pt_address = mmap_allocate_pages2(mmap, 1);
         
         memset(pt_address, 0, sizeof(Page_Table));
-        pml4->entries[pdt_index] = (UINTN)pt_address | flags;
+        pdt->entries[pdt_index] = (UINTN)pt_address | flags;
     }
     
     Page_Table *pt = (Page_Table*)(pdt->entries[pml4_index] & PHYS_PAGE_ADDR_MASK);
@@ -1316,15 +1319,28 @@ EFI_STATUS load_kernel(void) {
         kernel_size = file_size;
     }
     
-    // DEBUGGING
-    printf_c16(u"\r\nKernel address: %x, size: %u, entry point: %x\r\n",
-               kernel_buffer, kernel_size, (UINTN)entry_point);
     
-    if (!entry_point) goto cleanup;
+    UINTN entry_offset = (UINTN)entry_point - kernel_buffer;
+    
+    typedef void EFIAPI (*Entry_Point)(Kernel_Params *);
+    
+    Entry_Point higher_entry_point = (Entry_Point)(KERNEL_START_ADDRESS + entry_offset);
+    
+    
+    // DEBUGGING
+    printf_c16(u"\r\nOriginal Kernel address: %llx, size: %llu, entry point: %llx\r\n"
+               u"Higher address entry point: %llx\r\n",
+               (UINT64)kernel_buffer, (UINT64)kernel_size, (UINT64)entry_point, (UINT64)higher_entry_point);
+    
+    if (!entry_point) {
+        bs->FreePages(kernel_buffer, kernel_size / PAGE_SIZE);
+        goto cleanup;
+    }
     
     // TODO: Load Kernel File depending on format (initial header bytes)
     printf_c16(u"Press any key to load kernel...\r\n");
     get_key();
+    
     
     bs->CloseEvent(timer_event);
     
@@ -1333,6 +1349,9 @@ EFI_STATUS load_kernel(void) {
 #ifdef USE_MEMORY_MAP
     
     status = get_memory_map(&kparams.mmap);
+    
+    printf_c16(u"get_memory_map:%x\r\n",status);
+    
     if (EFI_ERROR(status)){
         goto cleanup;
     }
@@ -1365,22 +1384,112 @@ EFI_STATUS load_kernel(void) {
     
 #if 1
     pml4 = mmap_allocate_pages2(&kparams.mmap, 1);
+    printf_c16(u"pml4:%x\r\n",pml4);
+    
+    memset(pml4, 0, sizeof *pml4);
     
     identity_map_efi_mmap(&kparams.mmap);
     
     set_runtime_address_map2(&kparams.mmap);
     
-    // TODO: Remap kernel to higher address
+    // Remap kernel to higher address
     // including entry point (and kparams?)
     
-    // TODO: Identity map framebuffer
+    for (UINTN i = 0; i < (kernel_size + (PAGE_SIZE - 1)) / PAGE_SIZE; i++) {
+        map_page(kernel_buffer + (i*PAGE_SIZE), KERNEL_START_ADDRESS + (i*PAGE_SIZE), &kparams.mmap);
+    }
     
-    // TODO: Identity map new stack for kernel
+    // NOTE: Remap kparams to higher address?
+    // Identity map framebuffer
+    for (UINTN i = 0; i < (kparams.gop_mode.FrameBufferSize + (PAGE_SIZE - 1)) / PAGE_SIZE; i++) {
+        identity_map_page(kparams.gop_mode.FrameBufferBase + (i*PAGE_SIZE), &kparams.mmap);
+    }
     
-    // TODO: Set up new GDT & TSS
+    printf_c16(u"STACK_PAGES = 16\r\n");
+    
+    
+    // Identity map new stack for kernel
+    const UINTN STACK_PAGES = 16;
+    void *kernel_stack = mmap_allocate_pages(&kparams.mmap, STACK_PAGES);
+    uint32_t stack_size = STACK_PAGES * PAGE_SIZE;
+    memset(kernel_stack, 0, stack_size);
+    
+    for (UINTN i = 0; i < STACK_PAGES; i++) {
+        identity_map_page((UINTN)kernel_stack + (i*PAGE_SIZE), &kparams.mmap);
+    }
+    
+    
+    TSS tss = {.io_map_base = sizeof(TSS)};
+    UINTN tss_address = (UINTN)&tss;
+    
+    GDT gdt = {
+        .null.value             = 0x000000000000000,
+        
+        .kernel_code_64.value   = 0x00AF9A00000FFFF,
+        .kernel_data_64.value   = 0x00CF9200000FFFF,
+        
+        .user_code_64.value     = 0x00AFFA00000FFFF,
+        .user_data_64.value     = 0x00CFF200000FFFF,
+        
+        .kernel_code_32.value   = 0x00CF9A00000FFFF,
+        .kernel_data_32.value   = 0x00CF9200000FFFF,
+        
+        .user_code_32.value     = 0x00CFFA00000FFFF,
+        .user_data_32.value     = 0x00CFF200000FFFF,
+        
+        .tss = {
+            .descriptor = {
+                .limit_15_0 = sizeof tss - 1,
+                .base_15_0  = tss_address & 0xFFFF,
+                .base_23_16 = (tss_address >> 16) & 0xFF,
+                .type       = 9,
+                .p          = 1,
+                .base_31_24 = (tss_address >> 24) & 0xFF,
+            },
+                .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF
+        }
+    };
+    
+    Descriptor_Register gdtr = {.limit = sizeof gdt - 1, .base = (UINT64)&gdt};
+    
+    
+    
+    Kernel_Params *kparams_ptr = &kparams;
+    
+    
+    printf_c16(u"kparams_ptr:%x\r\n",kparams_ptr);
     
     // Clear interrupts before setting up new GDT/paging/etc.
-    __asm__ __volatile__("cli");
+    __asm__ __volatile__(
+                         "cli\n"
+                         "movq %[pml4], %%CR3\n"
+                         "lgdt %[gdt]\n"
+                         "ltr %[tss]\n"
+                         
+                         // Jump to new code segment in GDT (offset in GDT of 64 bit kernel/system code segment)
+                         "pushq $0x8\n"
+                         "leaq 1f(%%RIP), %%RAX\n"
+                         "pushq %%RAX\n"
+                         "lretq\n"
+                         
+                         
+                         "1:\n"
+                         "movq $0x10, %%RAX\n"
+                         "movq %%RAX, %%DS\n"
+                         "movq %%RAX, %%ES\n"
+                         "movq %%RAX, %%FS\n"
+                         "movq %%RAX, %%GS\n"
+                         "movq %%RAX, %%SS\n"
+                         
+                         "movq %[stack], %%RSP\n"
+                         
+                         "callq *%[entry]\n"
+                         
+                         :
+                         :    [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((UINT16)0x48),
+                         [stack]"gm"((UINTN)kernel_stack + (stack_size)),
+                         [entry]"r"(higher_entry_point), "c"(kparams_ptr)
+                         :    "rax", "memory");
     
     // TODO: Set new page tables (CR3 = PML4) and GDT (lgdt && ltr), and call entry point with params
     
@@ -1389,7 +1498,7 @@ EFI_STATUS load_kernel(void) {
 #endif
     
     // Call the kernel/OS here, Fully in control now, not in EFI anymore!
-    entry_point(kparams);
+    higher_entry_point(&kparams);
     
     __builtin_unreachable();
     
