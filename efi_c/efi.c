@@ -1355,48 +1355,35 @@ EFI_STATUS load_kernel(void) {
     
 #ifdef USE_MEMORY_MAP
     
-    status = get_memory_map(&kparams.mmap);
     
-    printf_c16(u"get_memory_map:%x\r\n",status);
+    // Get Memory Map
+    if (EFI_ERROR(get_memory_map(&kparams.mmap))) goto cleanup;
     
-    if (EFI_ERROR(status)){
-        goto cleanup;
-    }
-    
-    //   print_memory_map_with(kparams.mmap);
-    // TODO: Exit boot services before calling kernel
+    // Exit boot services before calling kernel
     UINTN retries = 0;
     const UINTN MAX_RETRIES = 5;
-    status = bs->ExitBootServices(image, kparams.mmap.key);
-    // printf_c16(u"bs->ExitBootServices: %u\r\n",status);
-    if (EFI_ERROR(status) && retries < MAX_RETRIES){
-        
+    while (EFI_ERROR(bs->ExitBootServices(image, kparams.mmap.key)) && retries < MAX_RETRIES) {
+        // firmware could do a partial shutdown, need to get memory map again
+        //   and try exit boot services again
         bs->FreePool(kparams.mmap.map);
-        status = get_memory_map(&kparams.mmap);
-        if (EFI_ERROR(status)){
-            goto cleanup;
-        }
+        if (EFI_ERROR(get_memory_map(&kparams.mmap))) goto cleanup;
         retries++;
     }
-    
-    if (retries == MAX_RETRIES){
-        printf_c16(u"Error: Could not find Exit Services!\r\n");
+    if (retries == MAX_RETRIES) {
+        error(0, u"Could not Exit Boot Services!\r\n");
         goto cleanup;
     }
+    
 #endif
     
-    kparams.RuntimeServices = rs;
-    kparams.NumberOfTableEntries = st->NumberOfTableEntries;
-    kparams.ConfigurationTable = st->ConfigurationTable;
     
 #if 1
     // Initialize page tables
     arch_init_page_tables(&kparams.mmap);
-
+    
     // Identity mapping all available memory
     identity_map_efi_mmap(&kparams.mmap);
     
-    printf_c16(u"set_runtime_address_map(&kparams.mmap);\r\n");
     // Identity map runtime services memory & set new runtime address map
     set_runtime_address_map(&kparams.mmap);
     
@@ -1432,19 +1419,19 @@ EFI_STATUS load_kernel(void) {
     
     GDT gdt = {
         .null.value           = 0x0000000000000000, // Null descriptor
-
+        
         .kernel_code_64.value = 0x00AF9A000000FFFF,
         .kernel_data_64.value = 0x00CF92000000FFFF,
-
+        
         .user_code_64.value   = 0x00AFFA000000FFFF,
         .user_data_64.value   = 0x00CFF2000000FFFF,
-
+        
         .kernel_code_32.value = 0x00CF9A000000FFFF,
         .kernel_data_32.value = 0x00CF92000000FFFF,
-
+        
         .user_code_32.value   = 0x00CFFA000000FFFF,
         .user_data_32.value   = 0x00CFF2000000FFFF,
-
+        
         .tss = {
             .descriptor = {
                 .limit_15_0 = sizeof tss - 1,
@@ -1454,7 +1441,7 @@ EFI_STATUS load_kernel(void) {
                 .p          = 1,    // Present
                 .base_31_24 = (tss_address >> 24) & 0xFF,
             },
-            .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF,
+                .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF,
         }
     };
     
@@ -1465,7 +1452,6 @@ EFI_STATUS load_kernel(void) {
     Kernel_Params *kparams_ptr = &kparams;
     
     
-    printf_c16(u"kparams_ptr:%x\r\n",kparams_ptr);
     
     // Clear interrupts before setting up new GDT/paging/etc.
     __asm__ __volatile__(
@@ -1473,13 +1459,13 @@ EFI_STATUS load_kernel(void) {
                          "movq %[pml4], %%CR3\n"     // Load new page tables
                          "lgdt %[gdt]\n"             // Load new GDT from gdtr register
                          "ltr %[tss]\n"              // Load new task register with new TSS value (byte offset into GDT)
-
+                         
                          // Jump to new code segment in GDT (offset in GDT of 64 bit kernel/system code segment)
                          "pushq $0x8\n"
                          "leaq 1f(%%RIP), %%RAX\n"
                          "pushq %%RAX\n"
                          "lretq\n"
-
+                         
                          // Executing code with new Code segment now, set up remaining segment registers
                          "1:\n"
                          "movq $0x10, %%RAX\n"   // Data segment to use (64 bit kernel data segment, offset in GDT)
@@ -1488,17 +1474,17 @@ EFI_STATUS load_kernel(void) {
                          "movq %%RAX, %%FS\n"    // Extra segment (2), these also have different uses in Long Mode
                          "movq %%RAX, %%GS\n"    // Extra segment (3), these also have different uses in Long Mode
                          "movq %%RAX, %%SS\n"    // Stack segment
-
+                         
                          // Set new stack value to use (for SP/stack pointer, etc.)
                          "movq %[stack], %%RSP\n"
-
+                         
                          // Call new entry point in higher memory
                          "callq *%[entry]\n" // First parameter is kparams in RCX in input constraints below, for MS ABI
-                       :
-                       : [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((uint16_t)offsetof(GDT, tss)),
+                         :
+                         : [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((uint16_t)offsetof(GDT, tss)),
                          [stack]"gm"((uint64_t)kernel_stack + stack_size),    // Top of newly allocated stack
                          [entry]"r"(higher_entry_point), "c"(kparams_ptr)
-                       : "rax", "memory");
+                         : "rax", "memory");
     
     // TODO: Set new page tables (CR3 = PML4) and GDT (lgdt && ltr), and call entry point with params
     
