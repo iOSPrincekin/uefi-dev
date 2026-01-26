@@ -2421,6 +2421,9 @@ void set_runtime_address_map(Memory_Map_Info *mmap) {
                                                  mmap->desc_size, 
                                                  mmap->desc_version,
                                                  runtime_mmap);
-    if (EFI_ERROR(status)) error(0, u"SetVirtualAddressMap()\r\n");
+    
+    printf_c16(u"set_runtime_address_map,status:%x \r\n",status);
+
+    if (EFI_ERROR(status)) error(0, u"SetVirtualAddressMap():%u\r\n",status);
 }
 

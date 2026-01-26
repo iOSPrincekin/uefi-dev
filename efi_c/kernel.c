@@ -32,11 +32,11 @@ typedef struct {
 } Kernel_Params;
 
 
-void EFIAPI kmain(Kernel_Params kargs) {
+__attribute__((section(".kernel"), aligned(0x1000))) void EFIAPI kmain(Kernel_Params* kargs) {
     // Grab Framebuffer/GOP info
-    UINT32 *fb = (UINT32 *)kargs.gop_mode.FrameBufferBase; // BGRA8888
-    UINT32 xres = kargs.gop_mode.Info->PixelsPerScanLine;
-    UINT32 yres = kargs.gop_mode.Info->VerticalResolution;
+    UINT32 *fb = (UINT32 *)kargs->gop_mode.FrameBufferBase; // BGRA8888
+    UINT32 xres = kargs->gop_mode.Info->PixelsPerScanLine;
+    UINT32 yres = kargs->gop_mode.Info->VerticalResolution;
     
     // Clear screen to solid color
     UINTN color = get_color(1);
@@ -59,14 +59,14 @@ void EFIAPI kmain(Kernel_Params kargs) {
     EFI_TIME_CAPABILITIES time_cap = {0};
     UINTN i = 0;
     while (i < 3){
-        kargs.RuntimeServices->GetTime(&new_time, &time_cap);
+        kargs->RuntimeServices->GetTime(&new_time, &time_cap);
         if (old_time.Second != new_time.Second){
             i++;
             old_time.Second = new_time.Second;
         }
     }
     
-    kargs.RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
+    kargs->RuntimeServices->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
     
     __builtin_unreachable();
     

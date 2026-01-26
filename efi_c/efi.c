@@ -1171,7 +1171,7 @@ void set_runtime_address_map2(Memory_Map_Info* mmap){
         return;
     }
     
-    UINTN runtime_mmap_size = runtime_mmap_pages / PAGE_SIZE;
+    UINTN runtime_mmap_size = runtime_mmap_pages * PAGE_SIZE;
     memset(runtime_mmap, 0, runtime_mmap_size);
     
     
@@ -1283,7 +1283,14 @@ EFI_STATUS load_kernel(void) {
         EFI_CONFIGURATION_TABLE           *ConfigurationTable;
     } Kernel_Params;
     
-    Kernel_Params kparams = {0};
+    
+    Kernel_Params kparams = {
+        .mmap                 = {0},
+        .gop_mode             = {0},
+        .RuntimeServices      = rs,
+        .NumberOfTableEntries = st->NumberOfTableEntries,
+        .ConfigurationTable   = st->ConfigurationTable,
+    };
     
     EFI_GUID gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
@@ -1383,20 +1390,22 @@ EFI_STATUS load_kernel(void) {
     kparams.ConfigurationTable = st->ConfigurationTable;
     
 #if 1
-    pml4 = mmap_allocate_pages2(&kparams.mmap, 1);
-    printf_c16(u"pml4:%x\r\n",pml4);
-    
-    memset(pml4, 0, sizeof *pml4);
-    
+    // Initialize page tables
+    arch_init_page_tables(&kparams.mmap);
+
+    // Identity mapping all available memory
     identity_map_efi_mmap(&kparams.mmap);
     
-    set_runtime_address_map2(&kparams.mmap);
+    printf_c16(u"set_runtime_address_map(&kparams.mmap);\r\n");
+    // Identity map runtime services memory & set new runtime address map
+    set_runtime_address_map(&kparams.mmap);
     
     // Remap kernel to higher address
     // including entry point (and kparams?)
-    
     for (UINTN i = 0; i < (kernel_size + (PAGE_SIZE - 1)) / PAGE_SIZE; i++) {
-        map_page(kernel_buffer + (i*PAGE_SIZE), KERNEL_START_ADDRESS + (i*PAGE_SIZE), &kparams.mmap);
+        arch_map_page(kernel_buffer + (i*PAGE_SIZE),
+                      KERNEL_START_ADDRESS + (i*PAGE_SIZE),
+                      &kparams.mmap);
     }
     
     // NOTE: Remap kparams to higher address?
@@ -1405,7 +1414,6 @@ EFI_STATUS load_kernel(void) {
         identity_map_page(kparams.gop_mode.FrameBufferBase + (i*PAGE_SIZE), &kparams.mmap);
     }
     
-    printf_c16(u"STACK_PAGES = 16\r\n");
     
     
     // Identity map new stack for kernel
@@ -1423,30 +1431,30 @@ EFI_STATUS load_kernel(void) {
     UINTN tss_address = (UINTN)&tss;
     
     GDT gdt = {
-        .null.value             = 0x000000000000000,
-        
-        .kernel_code_64.value   = 0x00AF9A00000FFFF,
-        .kernel_data_64.value   = 0x00CF9200000FFFF,
-        
-        .user_code_64.value     = 0x00AFFA00000FFFF,
-        .user_data_64.value     = 0x00CFF200000FFFF,
-        
-        .kernel_code_32.value   = 0x00CF9A00000FFFF,
-        .kernel_data_32.value   = 0x00CF9200000FFFF,
-        
-        .user_code_32.value     = 0x00CFFA00000FFFF,
-        .user_data_32.value     = 0x00CFF200000FFFF,
-        
+        .null.value           = 0x0000000000000000, // Null descriptor
+
+        .kernel_code_64.value = 0x00AF9A000000FFFF,
+        .kernel_data_64.value = 0x00CF92000000FFFF,
+
+        .user_code_64.value   = 0x00AFFA000000FFFF,
+        .user_data_64.value   = 0x00CFF2000000FFFF,
+
+        .kernel_code_32.value = 0x00CF9A000000FFFF,
+        .kernel_data_32.value = 0x00CF92000000FFFF,
+
+        .user_code_32.value   = 0x00CFFA000000FFFF,
+        .user_data_32.value   = 0x00CFF2000000FFFF,
+
         .tss = {
             .descriptor = {
                 .limit_15_0 = sizeof tss - 1,
                 .base_15_0  = tss_address & 0xFFFF,
                 .base_23_16 = (tss_address >> 16) & 0xFF,
-                .type       = 9,
-                .p          = 1,
+                .type       = 9,    // 0b1001 64 bit TSS (available)
+                .p          = 1,    // Present
                 .base_31_24 = (tss_address >> 24) & 0xFF,
             },
-                .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF
+            .base_63_32 = (tss_address >> 32) & 0xFFFFFFFF,
         }
     };
     
@@ -1461,35 +1469,36 @@ EFI_STATUS load_kernel(void) {
     
     // Clear interrupts before setting up new GDT/paging/etc.
     __asm__ __volatile__(
-                         "cli\n"
-                         "movq %[pml4], %%CR3\n"
-                         "lgdt %[gdt]\n"
-                         "ltr %[tss]\n"
-                         
+                         "cli\n"                     // Clear interrupts before setting new GDT/TSS, etc.
+                         "movq %[pml4], %%CR3\n"     // Load new page tables
+                         "lgdt %[gdt]\n"             // Load new GDT from gdtr register
+                         "ltr %[tss]\n"              // Load new task register with new TSS value (byte offset into GDT)
+
                          // Jump to new code segment in GDT (offset in GDT of 64 bit kernel/system code segment)
                          "pushq $0x8\n"
                          "leaq 1f(%%RIP), %%RAX\n"
                          "pushq %%RAX\n"
                          "lretq\n"
-                         
-                         
+
+                         // Executing code with new Code segment now, set up remaining segment registers
                          "1:\n"
-                         "movq $0x10, %%RAX\n"
-                         "movq %%RAX, %%DS\n"
-                         "movq %%RAX, %%ES\n"
-                         "movq %%RAX, %%FS\n"
-                         "movq %%RAX, %%GS\n"
-                         "movq %%RAX, %%SS\n"
-                         
+                         "movq $0x10, %%RAX\n"   // Data segment to use (64 bit kernel data segment, offset in GDT)
+                         "movq %%RAX, %%DS\n"    // Data segment
+                         "movq %%RAX, %%ES\n"    // Extra segment
+                         "movq %%RAX, %%FS\n"    // Extra segment (2), these also have different uses in Long Mode
+                         "movq %%RAX, %%GS\n"    // Extra segment (3), these also have different uses in Long Mode
+                         "movq %%RAX, %%SS\n"    // Stack segment
+
+                         // Set new stack value to use (for SP/stack pointer, etc.)
                          "movq %[stack], %%RSP\n"
-                         
-                         "callq *%[entry]\n"
-                         
-                         :
-                         :    [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((UINT16)0x48),
-                         [stack]"gm"((UINTN)kernel_stack + (stack_size)),
+
+                         // Call new entry point in higher memory
+                         "callq *%[entry]\n" // First parameter is kparams in RCX in input constraints below, for MS ABI
+                       :
+                       : [pml4]"r"(pml4), [gdt]"m"(gdtr), [tss]"r"((uint16_t)offsetof(GDT, tss)),
+                         [stack]"gm"((uint64_t)kernel_stack + stack_size),    // Top of newly allocated stack
                          [entry]"r"(higher_entry_point), "c"(kparams_ptr)
-                         :    "rax", "memory");
+                       : "rax", "memory");
     
     // TODO: Set new page tables (CR3 = PML4) and GDT (lgdt && ltr), and call entry point with params
     
@@ -1498,7 +1507,7 @@ EFI_STATUS load_kernel(void) {
 #endif
     
     // Call the kernel/OS here, Fully in control now, not in EFI anymore!
-    higher_entry_point(&kparams);
+    // higher_entry_point(&kparams);
     
     __builtin_unreachable();
     
