@@ -1669,6 +1669,221 @@ EFI_STATUS print_acpi_tables(void) {
     return EFI_SUCCESS;
 }
 
+EFI_STATUS print_efi_global_varibles(void) {
+    cout->ClearScreen(cout);
+    bs->CloseEvent(timer_event);
+    
+    
+    // TODO:
+    UINTN var_name_size = 0;
+    CHAR16 *var_name_buf = 0;
+    EFI_GUID vendor_guid = {0};
+    EFI_STATUS status = EFI_SUCCESS;
+    
+    var_name_size = 2;
+    status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&var_name_buf);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Could not allocate 2 bytes,status:%u\r\n",status);
+        return status;
+    }
+    
+    *var_name_buf = u'\0';
+    
+    //  UINTN temp_size = var_name_size;
+    
+    status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+    while (status != EFI_NOT_FOUND) {
+        if (status == EFI_BUFFER_TOO_SMALL) {
+            CHAR16 *temp_buf = NULL;
+            status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&temp_buf);
+            if (EFI_ERROR(status)){
+                printf_c16(u"Could not allocate %u bytes of memory for next variable name. status:%u\r\n",var_name_size,status);
+                return status;
+            }
+            
+            strcpy_u16(temp_buf, var_name_buf);
+            
+            bs->FreePool(var_name_buf);
+            
+            var_name_buf = temp_buf;
+            //  temp_size = var_name_size;
+            
+            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+            continue;
+        }
+        
+        printf_c16(u"%s\r\n",var_name_buf);
+        
+        if (cout->Mode->CursorRow >= text_rows-2) {
+            printf_c16(u"\r\nPress any key to continue...\r\n");
+            get_key();
+            cout->ClearScreen(cout);
+        }
+        status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+    }
+    
+    bs->FreePool(var_name_buf);
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    get_key();
+    return EFI_SUCCESS;
+}
+
+EFI_STATUS change_boot_variables(void) {
+    cout->ClearScreen(cout);
+    bs->CloseEvent(timer_event);
+    
+    EFI_STATUS status = EFI_SUCCESS;
+    
+    // Get Device Path to Text protocol to print Load Option device/file path
+    EFI_GUID dpttp_guid = EFI_DEVICE_PATH_TO_TEXT_PROTOCOL_GUID;
+    EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dpttp;
+    status = bs->LocateProtocol(&dpttp_guid, NULL, (VOID **)&dpttp);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Could not locate Device Path To Text Protocol. \r\n");
+        return status;
+    }
+    // TODO:
+    UINTN var_name_size = 0;
+    CHAR16 *var_name_buf = 0;
+    EFI_GUID vendor_guid = {0};
+    
+    var_name_size = 2;
+    status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&var_name_buf);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Could not allocate 2 bytes,status:%u\r\n",status);
+        return status;
+    }
+    
+    *var_name_buf = u'\0';
+    
+    //  UINTN temp_size = var_name_size;
+    
+    status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+    do {
+        if (status == EFI_BUFFER_TOO_SMALL) {
+            CHAR16 *temp_buf = NULL;
+            status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&temp_buf);
+            if (EFI_ERROR(status)){
+                printf_c16(u"Could not allocate %u bytes of memory for next variable name. status:%u\r\n",var_name_size,status);
+                return status;
+            }
+            
+            strcpy_u16(temp_buf, var_name_buf);
+            
+            bs->FreePool(var_name_buf);
+            
+            var_name_buf = temp_buf;
+            //  temp_size = var_name_size;
+            
+            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+            continue;
+        }
+        
+        if (!memcmp(var_name_buf,u"Boot", 8)) {
+            printf_c16(u"%.*s\r\n", var_name_size, var_name_buf);
+            
+            // Get variable value
+            UINT32 attributes = 0;
+            UINTN data_size = 0;
+            VOID *data = NULL;
+            
+            // Call first with 0 data size to get actual size needed
+            rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, NULL);
+            
+            status = bs->AllocatePool(EfiLoaderData, data_size, (VOID **)&data);
+            if (EFI_ERROR(status)) {
+                printf_c16(u"Could not allocate %u bytes of memory for GetVariable(), status:%u.\r\n", data_size, status);
+                
+                goto cleanup;
+            }
+            
+            
+            // Get actual data now with correct size
+            rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, data);
+            
+            if (!memcmp(var_name_buf, u"BootOrder", 18)) {
+                
+                UINT16 *p = data;
+                printf_c16(u"Description: %#.4x\r\n",data);
+                
+                
+                printf_c16(u"0x");
+                for (UINTN i = 0; i < data_size / 2; i++) {
+                    printf_c16(u"%.4x,", *p++);
+                }
+                printf_c16(u"\r\n");
+                goto next;
+            }
+            
+            if (!memcmp(var_name_buf, u"BootOptionSupport", 34)) {
+                UINT32 *p = data;
+                printf_c16(u"%#.8hx\r\n\r\n", *p);
+                goto next;
+            }
+            
+            if (!memcmp(var_name_buf, u"BootNext", 18) ||
+                !memcmp(var_name_buf, u"BootCurrent", 22)) {
+                UINT16 *p = data;
+                printf_c16(u"%#.4hx\r\n\r\n", *p);
+                goto next;
+            }
+            
+            if (isxdigit_c16(var_name_buf[4])) {
+                // TODO:
+                EFI_LOAD_OPTION *load_option = (EFI_LOAD_OPTION *)data;
+                CHAR16 *description = (CHAR16 *)((UINT8 *)data + sizeof(UINT32) + sizeof(UINT16));
+                printf_c16(u"Description: %s\r\n\r\n",description);
+                
+                CHAR16 *p = description;
+                UINTN strlen =  0;
+                while (p[strlen]) strlen++;
+                strlen++;                    // Skip null byte
+                
+                EFI_DEVICE_PATH_PROTOCOL *file_path_list =
+                (EFI_DEVICE_PATH_PROTOCOL *)(description + strlen);
+                
+                CHAR16 *device_path_text =
+                dpttp->ConvertDevicePathToText(file_path_list, FALSE, FALSE);
+                
+                if (!device_path_text) {
+                    printf_c16(u"Could not get device path text for load option %s\r\n\r\n",var_name_buf);
+                } else {
+                    printf_c16(u"Device Path: %s\r\n\r\n",device_path_text);
+                }
+                
+                goto next;
+            }
+            
+            
+            
+        next:
+            bs->FreePool(data);
+        }
+        
+        if (cout->Mode->CursorRow >= text_rows-2) {
+            printf_c16(u"\r\nPress any key to continue...\r\n");
+            get_key();
+            cout->ClearScreen(cout);
+        }
+        status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+    } while (status != EFI_NOT_FOUND);
+    
+    // TODO: Allow user to change values
+    
+    // TODO: Change BootOrder
+    
+    // TODO: Change BootNext
+    
+    
+cleanup:
+    
+    bs->FreePool(var_name_buf);
+    
+    printf_c16(u"\r\nPress any key to go back...\r\n");
+    get_key();
+    return EFI_SUCCESS;
+}
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     
@@ -1677,6 +1892,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     cout->Reset(cout, false);
     
     cout->SetAttribute(cout, EFI_TEXT_ATTR(EFI_YELLOW, EFI_BLUE));
+    
+    // Get current text mode ColsxRows values
+    UINTN cols = 0, rows = 0;
+    cout->QueryMode(cout, cout->Mode->Mode, &cols, &rows);
+    
+    // Set global text rows/cols values
+    text_rows = rows;
+    text_cols = cols;
     
     bool running = true;
     
@@ -1691,7 +1914,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             u"Load Kernel",
             u"Print Memory Map",
             u"Print Config Tables",
-            u"Print ACPI Tables"
+            u"Print ACPI Tables",
+            u"Print Efi Global Varibles",
+            u"Change Boot Variables "
         };
         
         EFI_STATUS (*menu_funcs[])(void) = {
@@ -1704,7 +1929,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             load_kernel,
             print_memory_map,
             print_config_tables,
-            print_acpi_tables
+            print_acpi_tables,
+            print_efi_global_varibles,
+            change_boot_variables
         };
         cout->ClearScreen(cout);
         
