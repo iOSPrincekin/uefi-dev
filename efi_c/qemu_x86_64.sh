@@ -9,17 +9,18 @@ else
 fi
 
 # Build QEMU command
-QEMU_CMD="qemu-system-x86_64 \\
--drive format=raw,file=../UEFI-GPT-image-creator/test.hdd \\
--bios ../UEFI-GPT-image-creator/bios64.bin \\
--m 256M \\
--vga std \\
--display $DISPLAY_BACKEND \\
--name TESTOS \\
--machine q35 \\
--usb \\
--device usb-mouse \\
--rtc base=localtime \\
+QEMU_CMD="qemu-system-x86_64 \
+-drive format=raw,file=../UEFI-GPT-image-creator/test.hdd \
+-drive if=pflash,format=raw,readonly=on,file=../UEFI-GPT-image-creator/OVMF_CODE.fd \
+-drive if=pflash,format=raw,file=../UEFI-GPT-image-creator/OVMF_VARS.fd \
+-m 256M \
+-vga std \
+-display $DISPLAY_BACKEND \
+-name TESTOS \
+-machine q35 \
+-usb \
+-device usb-mouse \
+-rtc base=localtime \
 -net none"
 
 # Print detailed command
@@ -31,18 +32,7 @@ echo "=========================================="
 echo ""
 
 # Execute QEMU
-qemu-system-x86_64 \
--drive format=raw,file=../UEFI-GPT-image-creator/test.hdd \
--bios ../UEFI-GPT-image-creator/bios64.bin \
--m 256M \
--vga std \
--display $DISPLAY_BACKEND \
--name TESTOS \
--machine q35 \
--usb \
--device usb-mouse \
--rtc base=localtime \
--net none
+${QEMU_CMD}
 
 
 # For pc speaker audio, add these lines depending on your sound backend

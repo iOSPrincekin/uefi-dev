@@ -1730,158 +1730,208 @@ EFI_STATUS print_efi_global_varibles(void) {
 }
 
 EFI_STATUS change_boot_variables(void) {
-    cout->ClearScreen(cout);
+    // Close Timer Event for cleanup
     bs->CloseEvent(timer_event);
-    
+
+    // Get Device Path to Text protocol to print Load Option device/file paths
     EFI_STATUS status = EFI_SUCCESS;
-    
-    // Get Device Path to Text protocol to print Load Option device/file path
     EFI_GUID dpttp_guid = EFI_DEVICE_PATH_TO_TEXT_PROTOCOL_GUID;
     EFI_DEVICE_PATH_TO_TEXT_PROTOCOL *dpttp;
     status = bs->LocateProtocol(&dpttp_guid, NULL, (VOID **)&dpttp);
     if (EFI_ERROR(status)) {
-        printf_c16(u"Could not locate Device Path To Text Protocol. \r\n");
+        error(status, u"Could not locate Device Path To Text Protocol.\r\n");
         return status;
     }
-    // TODO:
-    UINTN var_name_size = 0;
-    CHAR16 *var_name_buf = 0;
-    EFI_GUID vendor_guid = {0};
-    
-    var_name_size = 2;
-    status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&var_name_buf);
-    if (EFI_ERROR(status)) {
-        printf_c16(u"Could not allocate 2 bytes,status:%u\r\n",status);
-        return status;
-    }
-    
-    *var_name_buf = u'\0';
-    
-    //  UINTN temp_size = var_name_size;
-    
-    status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
-    do {
-        if (status == EFI_BUFFER_TOO_SMALL) {
-            CHAR16 *temp_buf = NULL;
-            status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&temp_buf);
-            if (EFI_ERROR(status)){
-                printf_c16(u"Could not allocate %u bytes of memory for next variable name. status:%u\r\n",var_name_size,status);
-                return status;
-            }
-            
-            strcpy_u16(temp_buf, var_name_buf);
-            
-            bs->FreePool(var_name_buf);
-            
-            var_name_buf = temp_buf;
-            //  temp_size = var_name_size;
-            
-            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
-            continue;
+
+    // Overall screen loop
+    UINT32 boot_order_attributes = 0;
+    while (true) {
+        cout->ClearScreen(cout);
+
+        UINTN var_name_size = 0;
+        CHAR16 *var_name_buf = 0;
+        EFI_GUID vendor_guid = {0};
+
+        var_name_size = 2;
+        status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&var_name_buf);
+        if (EFI_ERROR(status)) {
+            error(status, u"Could not allocate 2 bytes...\r\n");
+            return status;
         }
-        
-        if (!memcmp(var_name_buf,u"Boot", 8)) {
-            printf_c16(u"%.*s\r\n", var_name_size, var_name_buf);
-            
-            // Get variable value
-            UINT32 attributes = 0;
-            UINTN data_size = 0;
-            VOID *data = NULL;
-            
-            // Call first with 0 data size to get actual size needed
-            rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, NULL);
-            
-            status = bs->AllocatePool(EfiLoaderData, data_size, (VOID **)&data);
-            if (EFI_ERROR(status)) {
-                printf_c16(u"Could not allocate %u bytes of memory for GetVariable(), status:%u.\r\n", data_size, status);
-                
-                goto cleanup;
-            }
-            
-            
-            // Get actual data now with correct size
-            rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, data);
-            
-            if (!memcmp(var_name_buf, u"BootOrder", 18)) {
-                
-                UINT16 *p = data;
-                printf_c16(u"Description: %#.4x\r\n",data);
-                
-                
-                printf_c16(u"0x");
-                for (UINTN i = 0; i < data_size / 2; i++) {
-                    printf_c16(u"%.4x,", *p++);
-                }
-                printf_c16(u"\r\n");
-                goto next;
-            }
-            
-            if (!memcmp(var_name_buf, u"BootOptionSupport", 34)) {
-                UINT32 *p = data;
-                printf_c16(u"%#.8hx\r\n\r\n", *p);
-                goto next;
-            }
-            
-            if (!memcmp(var_name_buf, u"BootNext", 18) ||
-                !memcmp(var_name_buf, u"BootCurrent", 22)) {
-                UINT16 *p = data;
-                printf_c16(u"%#.4hx\r\n\r\n", *p);
-                goto next;
-            }
-            
-            if (isxdigit_c16(var_name_buf[4])) {
-                // TODO:
-                EFI_LOAD_OPTION *load_option = (EFI_LOAD_OPTION *)data;
-                CHAR16 *description = (CHAR16 *)((UINT8 *)data + sizeof(UINT32) + sizeof(UINT16));
-                printf_c16(u"Description: %s\r\n\r\n",description);
-                
-                CHAR16 *p = description;
-                UINTN strlen =  0;
-                while (p[strlen]) strlen++;
-                strlen++;                    // Skip null byte
-                
-                EFI_DEVICE_PATH_PROTOCOL *file_path_list =
-                (EFI_DEVICE_PATH_PROTOCOL *)(description + strlen);
-                
-                CHAR16 *device_path_text =
-                dpttp->ConvertDevicePathToText(file_path_list, FALSE, FALSE);
-                
-                if (!device_path_text) {
-                    printf_c16(u"Could not get device path text for load option %s\r\n\r\n",var_name_buf);
-                } else {
-                    printf_c16(u"Device Path: %s\r\n\r\n",device_path_text);
-                }
-                
-                goto next;
-            }
-            
-            
-            
-        next:
-            bs->FreePool(data);
-        }
-        
-        if (cout->Mode->CursorRow >= text_rows-2) {
-            printf_c16(u"\r\nPress any key to continue...\r\n");
-            get_key();
-            cout->ClearScreen(cout);
-        }
+
+        // Set variable name to point to initial single null byte, to start off call to get list of
+        //   variable names
+        *var_name_buf = u'\0';
+
         status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
-    } while (status != EFI_NOT_FOUND);
-    
-    // TODO: Allow user to change values
-    
-    // TODO: Change BootOrder
-    
-    // TODO: Change BootNext
-    
-    
-cleanup:
-    
-    bs->FreePool(var_name_buf);
-    
-    printf_c16(u"\r\nPress any key to go back...\r\n");
-    get_key();
+        while (status != EFI_NOT_FOUND) {   // End of list
+            if (status == EFI_BUFFER_TOO_SMALL) {
+                // Reallocate larger buffer for variable name
+                CHAR16 *temp_buf = NULL;
+                status = bs->AllocatePool(EfiLoaderData, var_name_size, (VOID **)&temp_buf);
+                if (EFI_ERROR(status)) {
+                    error(status, u"Could not allocate %u bytes of memory for next variable name.\r\n",
+                                  var_name_size);
+                    return status;
+                }
+                
+                strcpy_c16(temp_buf, var_name_buf);  // Copy old buffer to new buffer
+                bs->FreePool(var_name_buf);          // Free old buffer
+                var_name_buf = temp_buf;             // Set new buffer
+
+                status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+                continue;
+            }
+
+            // Print variable name and their value(s)
+            if (!memcmp(var_name_buf, u"Boot", 8)) {
+                printf_c16(u"\r\n%.*s: ", var_name_size, var_name_buf);
+
+                // Get variable value
+                UINT32 attributes = 0;
+                UINTN data_size = 0;
+                VOID *data = NULL;
+
+                // Call first with 0 data size to get actual size needed
+                rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, NULL);
+
+                status = bs->AllocatePool(EfiLoaderData, data_size, (VOID **)&data);
+                if (EFI_ERROR(status)) {
+                    error(status, u"Could not allocate %u bytes of memory for GetVariable().\r\n",
+                                  data_size);
+                    goto cleanup;
+                }
+
+                // Get actual data now with correct size
+                rs->GetVariable(var_name_buf, &vendor_guid, &attributes, &data_size, data);
+                if (data_size == 0) goto next;  // Skip this one if no data
+
+                if (!memcmp(var_name_buf, u"BootOrder", 18)) {
+                    boot_order_attributes = attributes; // Use if user sets new BootOrder value
+
+                    // Print array of UINT16 values
+                    UINT16 *p = data;
+
+                    for (UINTN i = 0; i < data_size / 2; i++)
+                        printf_c16(u"%#.4x,", *p++);
+
+                    printf_c16(u"\r\n");
+                    goto next;
+                }
+
+                if (!memcmp(var_name_buf, u"BootOptionSupport", 34)) {
+                    // Single UINT32 value
+                    UINT32 *p = data;
+                    printf_c16(u"%#.8x\r\n", *p);
+                    goto next;
+                }
+
+                if (!memcmp(var_name_buf, u"BootNext",    18) ||
+                    !memcmp(var_name_buf, u"BootCurrent", 22)) {
+
+                    // Single UINT16 value
+                    UINT16 *p = data;
+                    printf_c16(u"%#.4hx\r\n", *p);
+                    goto next;
+                }
+
+                if (isxdigit_c16(var_name_buf[4]) && var_name_size == 18) {
+                    // Boot#### load option: Name size = 8 CHAR16 chars * 2 bytes + CHAR16 null bytes
+                    EFI_LOAD_OPTION *load_option = (EFI_LOAD_OPTION *)data;
+                    CHAR16 *description = (CHAR16 *)((UINT8 *)data + sizeof(UINT32) + sizeof(UINT16));
+                    printf_c16(u"%s\r\n", description);
+
+                    CHAR16 *p = description;
+                    UINTN strlen =  0;
+                    while (p[strlen]) strlen++;
+                    strlen++;                    // Skip null byte
+
+                    EFI_DEVICE_PATH_PROTOCOL *file_path_list =
+                        (EFI_DEVICE_PATH_PROTOCOL *)(description + strlen);
+
+                    CHAR16 *device_path_text =
+                        dpttp->ConvertDevicePathToText(file_path_list, FALSE, FALSE);
+
+                    printf_c16(u"Device Path: %s\r\n", device_path_text ? device_path_text : u"(null)");
+
+                    UINT8 *optional_data = (UINT8 *)file_path_list + load_option->FilePathListLength;
+                    UINTN optional_data_size = data_size - (optional_data - (UINT8 *)data);
+                    if (optional_data_size > 0) {
+                        printf_c16(u"Optional Data: 0x");
+                        for (UINTN i = 0; i < optional_data_size; i++)
+                            printf_c16(u"%.2hhx", optional_data[i]);
+
+                        printf_c16(u"\r\n");
+                    }
+                    
+                    goto next;
+                }
+
+                printf_c16(u"\r\n");  // Unhandled Boot* variable, go on with space before next one
+
+                next:
+                bs->FreePool(data);
+            }
+
+            // Pause at bottom of screen
+            if (cout->Mode->CursorRow >= text_rows-2) {
+                printf_c16(u"Press any key to continue...\r\n");
+                get_key();
+                cout->ClearScreen(cout);
+            }
+            status = rs->GetNextVariableName(&var_name_size, var_name_buf, &vendor_guid);
+        }
+
+        // Allow user to change values
+        printf_c16(u"Press '1' to change BootOrder, '2' to change BootNext, or other to go back...");
+        EFI_INPUT_KEY key = get_key();
+        if (key.UnicodeChar == u'1') {
+            // Change BootOrder - set new array of UINT16 values
+            #define MAX_BOOT_OPTIONS 10
+            UINT16 option_array[MAX_BOOT_OPTIONS] = {0};
+            UINTN new_option = 0;
+            UINT16 num_options = 0;
+            for (UINTN i = 0; i < MAX_BOOT_OPTIONS; i++) {
+                printf_c16(u"\r\nBoot Option %u (0000-FFFF): ", i+1);
+                if (!get_num(&new_option, 16)) break;    // Stop processing
+                option_array[num_options++] = new_option;
+            }
+
+            EFI_GUID guid = EFI_GLOBAL_VARIABLE_GUID;
+            status = rs->SetVariable(u"BootOrder",
+                                     &guid,
+                                     boot_order_attributes,
+                                     num_options*2,
+                                     option_array);
+            
+            printf_c16(u"rs->SetVariable,BootOrder,status:%u\r\n", status);
+            if (EFI_ERROR(status))
+                error(status, u"Could not Set new value for BootOrder.\r\n");
+            get_key();
+        } else if (key.UnicodeChar == u'2') {
+            // Change BootNext value - set new UINT16
+            printf_c16(u"\r\nBootNext value (0000-FFFF): ");
+            UINTN value = 0;
+            if (get_num(&value, 16)) {
+                EFI_GUID guid = EFI_GLOBAL_VARIABLE_GUID;
+                UINT32 attr = EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS |
+                              EFI_VARIABLE_RUNTIME_ACCESS;
+
+                status = rs->SetVariable(u"BootNext", &guid, attr, 2, &value);
+                if (EFI_ERROR(status))
+                    error(status, u"Could not Set new value for BootNext.\r\n");
+            }
+
+        } else {
+            bs->FreePool(var_name_buf);
+            break;
+        }
+
+        cleanup:
+        // Free buffers when done
+        bs->FreePool(var_name_buf);
+    }
+
     return EFI_SUCCESS;
 }
 
