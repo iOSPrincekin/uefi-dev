@@ -2405,6 +2405,7 @@ EFI_STATUS write_to_another_disk(void) {
     EFI_BLOCK_IO_PROTOCOL *biop;
     UINTN num_handles = 0;
     EFI_HANDLE *handle_buffer = NULL;
+    EFI_BLOCK_IO_PROTOCOL disk_image_bio = {0}, chosen_disk_bio = {0};
     
     cout->ClearScreen(cout);
 
@@ -2447,9 +2448,13 @@ EFI_STATUS write_to_another_disk(void) {
             printf_c16(u"Media ID: %u %s\r\n",
                        last_media_id,
                        (last_media_id == this_image_media_id ? u"(Disk Image)" : u""));
+            
+            if (last_media_id == this_image_media_id) {
+                disk_image_bio = *biop;
+            }
         }
         
-        UINTN size = biop->Media->LastBlock * biop->Media->BlockSize;
+        UINTN size = (biop->Media->LastBlock + 1) * biop->Media->BlockSize;
         printf_c16(u"Rmv: %.1s, BlkSz: %u, LstBlk: %llu, LwLBA: %llu\r\n"
                    u"Size: %llu/%llu MiB/%llu GiB\r\n\r\n",
                    biop->Media->RemovableMedia   ? u"Y" : u"N",
@@ -2460,6 +2465,37 @@ EFI_STATUS write_to_another_disk(void) {
                    );
         
     }
+    
+    
+    // Take in a number from the user for the media to write the disk image to
+    printf_c16(u"Input Media ID number to write to:");
+    UINTN chosen_media = 0;
+    get_num(&chosen_media,10);
+    
+    for (UINTN i = 0; i < num_handles; i++) {
+        status = bs->OpenProtocol(handle_buffer[i],
+                                  &bio_guid,
+                                  (VOID **)&biop,
+                                  image,
+                                  NULL,
+                                  EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        
+        if (EFI_ERROR(status)) {
+            printf_c16(u"Could not Open Block IO protocol on handle %u.\r\n", i);
+            continue;
+        }
+        
+        if (biop->Media->MediaId == chosen_media) {
+            chosen_disk_bio = *biop;
+            break;
+        }
+    }
+    
+    // Print info about chosen disk and disk image
+    // block size for from and to disks
+    UINT32 from_block_size = disk_image_bio.Media->BlockSize,
+           to_block_size = chosen_disk_bio.Media->BlockSize;
+    
     
     printf_c16(u"Press any key to go back..\r\n");
     get_key();
