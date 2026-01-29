@@ -2405,7 +2405,7 @@ EFI_STATUS write_to_another_disk(void) {
     EFI_BLOCK_IO_PROTOCOL *biop;
     UINTN num_handles = 0;
     EFI_HANDLE *handle_buffer = NULL;
-    EFI_BLOCK_IO_PROTOCOL disk_image_bio = {0}, chosen_disk_bio = {0};
+    EFI_BLOCK_IO_PROTOCOL *disk_image_bio = NULL, *chosen_disk_bio = NULL;
     
     cout->ClearScreen(cout);
 
@@ -2415,6 +2415,69 @@ EFI_STATUS write_to_another_disk(void) {
         printf_c16(u"Could not get Disk Image Media ID.\r\n");
         return status;
     }
+    
+    // In order to get the device handle to use for the Simple File System Protocol
+    EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *lip = NULL;
+    status = bs->OpenProtocol(
+        image,
+        &lip_guid,
+        (VOID **)&lip,
+        image,
+        NULL,
+        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+    );
+    if (EFI_ERROR(status)) {
+        error(status, u"Could not open Loaded Image Protocol\r\n");
+        return status;
+    }
+
+    // Get Simple File System Protocol for device handle for this loaded
+    // image, to open the root directory for the ESP
+    EFI_GUID sfsp_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *sfsp = NULL;
+    status = bs->OpenProtocol(
+        lip->DeviceHandle,
+        &sfsp_guid,
+        (VOID **)&sfsp,
+        image,
+        NULL,
+        EFI_OPEN_PROTOCOL_GET_PROTOCOL
+    );
+    if (EFI_ERROR(status)) {
+        error(status, u"Could not open Simple File System Protocol\r\n");
+        return status;
+    }
+
+    // Open root directory via OpenVolume()
+    EFI_FILE_PROTOCOL *root = NULL;
+    EFI_FILE_PROTOCOL *file = NULL;
+    status = sfsp->OpenVolume(sfsp, &root);
+    if (EFI_ERROR(status)) {
+        error(status, u"Could not Open Volume for root directory\r\n");
+        return status;
+    }
+    
+    // Get size of disk image from file
+    CHAR16 *file_name = u"\\EFI\\BOOT\\FILE.TXT";
+    UINTN buf_size = 0;
+    VOID *file_buffer = NULL;
+    file_buffer = read_esp_file_to_buffer(file_name, &buf_size);
+    if (!file_buffer) {
+        error(0, u"Could not find or read file '%s' to buffer\r\n", file_name);
+        return 1;
+    }
+
+    char *str_pos = strstr(file_buffer, "DISK_SIZE=");
+    if (!str_pos) {
+        error(0, u"Could not find disk image size in DSKIMG.INF\r\n");
+        return 1;
+    }
+    
+    str_pos += strlen("DISK_SIZE=");
+    UINTN disk_image_size = atoi(str_pos);
+    
+    bs->FreePool(file_buffer);
     
     // Loop through and print all full disk Block IO protocol
     status = bs->LocateHandleBuffer(ByProtocol, &bio_guid, NULL, &num_handles, &handle_buffer);
@@ -2450,19 +2513,27 @@ EFI_STATUS write_to_another_disk(void) {
                        (last_media_id == this_image_media_id ? u"(Disk Image)" : u""));
             
             if (last_media_id == this_image_media_id) {
-                disk_image_bio = *biop;
+                disk_image_bio = biop;
             }
         }
         
         UINTN size = (biop->Media->LastBlock + 1) * biop->Media->BlockSize;
         printf_c16(u"Rmv: %.1s, BlkSz: %u, LstBlk: %llu, LwLBA: %llu\r\n"
                    u"Size: %llu/%llu MiB/%llu GiB\r\n\r\n",
-                   biop->Media->RemovableMedia   ? u"Y" : u"N",
+                   biop->Media->RemovableMedia   ? u"Yes" : u"No",
                    biop->Media->BlockSize,
                    biop->Media->LastBlock,
                    biop->Media->LowestAlignedLba,
                    size, size / (1024 * 1024), size / (1024 * 1024 * 1024)
                    );
+        
+        if (biop->Media->MediaId == this_image_media_id) {
+            printf_c16(u"Disk image size: %llu/%llu MiB/%llu GiB\r\n\r\n",
+                       disk_image_size, disk_image_size / (1024 * 1024), disk_image_size / (1024 * 1024 * 1024)
+                       );
+        }
+        
+        printf_c16(u"\r\n");
         
     }
     
@@ -2471,7 +2542,7 @@ EFI_STATUS write_to_another_disk(void) {
     printf_c16(u"Input Media ID number to write to:");
     UINTN chosen_media = 0;
     get_num(&chosen_media,10);
-    
+    bool found = false;
     for (UINTN i = 0; i < num_handles; i++) {
         status = bs->OpenProtocol(handle_buffer[i],
                                   &bio_guid,
@@ -2486,21 +2557,74 @@ EFI_STATUS write_to_another_disk(void) {
         }
         
         if (biop->Media->MediaId == chosen_media) {
-            chosen_disk_bio = *biop;
+            chosen_disk_bio = biop;
+            found = true;
             break;
         }
     }
     
+    if (!found)
+    {
+        error(0,u"Could not find media with ID: %u\r\n", chosen_media);
+        return 1;
+    }
     // Print info about chosen disk and disk image
     // block size for from and to disks
-    UINT32 from_block_size = disk_image_bio.Media->BlockSize,
-           to_block_size = chosen_disk_bio.Media->BlockSize;
+    UINT32 from_block_size = disk_image_bio->Media->BlockSize,
+           to_block_size = chosen_disk_bio->Media->BlockSize;
     
+    
+    UINTN from_blocks = (disk_image_size + (from_block_size - 1)) / from_block_size;
+    UINTN to_blocks = (disk_image_size + (to_block_size - 1)) / to_block_size;
+
+    printf_c16(u"\r\nFrom block size: %u, To block size: %u\r\n"
+               u"From blocks: %u, To blocks: %u\r\n",
+               from_block_size, to_block_size,
+               from_blocks, to_blocks
+               );
+    
+    
+    VOID *image_buffer = NULL;
+    status = bs->AllocatePool(EfiLoaderData, disk_image_size, &image_buffer);
+    if (EFI_ERROR(status))
+    {
+        error(0,u"Could not allocate memory for disk image.\r\n");
+        return status;
+    }
+    
+    printf_c16(u"Reading %u blocks from disk image to buffer...\r\n",from_blocks);
+    
+    status = disk_image_bio->ReadBlocks(disk_image_bio,
+                                       this_image_media_id,
+                                       0,
+                                       from_blocks * from_block_size,
+                                       image_buffer);
+    
+    if (EFI_ERROR(status)) {
+        error(0,u"Could not read blocks from disk image media to buffer.\r\n");
+        return status;
+    }
+    
+    printf_c16(u"Writing %u blocks from disk image to buffer...\r\n",from_blocks);
+    
+    status = chosen_disk_bio->WriteBlocks(chosen_disk_bio,
+                                       chosen_media,
+                                       0,
+                                       to_blocks * to_block_size,
+                                       image_buffer);
+    
+    if (EFI_ERROR(status)) {
+        error(0,u"Could not write blocks from disk image media to chosen disk  .\r\n");
+        return status;
+    }
+
+    bs->FreePool(image_buffer);
+
     
     printf_c16(u"Press any key to go back..\r\n");
+
     get_key();
     
-
     return status;
 }
 
