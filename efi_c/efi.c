@@ -2397,6 +2397,77 @@ EFI_STATUS add_boot_variables(void) {
     // Display updated boot variables list
     return change_boot_variables();
 }
+
+EFI_STATUS write_to_another_disk(void) {
+    
+    EFI_STATUS status = EFI_SUCCESS;
+    EFI_GUID bio_guid = EFI_BLOCK_IO_PROTOCOL_GUID;
+    EFI_BLOCK_IO_PROTOCOL *biop;
+    UINTN num_handles = 0;
+    EFI_HANDLE *handle_buffer = NULL;
+    
+    cout->ClearScreen(cout);
+
+    UINT32 this_image_media_id = 0;
+    status = get_disk_image_mediaID(&this_image_media_id);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Could not get Disk Image Media ID.\r\n");
+        return status;
+    }
+    
+    // Loop through and print all full disk Block IO protocol
+    status = bs->LocateHandleBuffer(ByProtocol, &bio_guid, NULL, &num_handles, &handle_buffer);
+    if (EFI_ERROR(status)) {
+        printf_c16(u"Could not locate any Block IO Protocols.\r\n");
+        return status;
+    }
+    
+    UINT32 last_media_id = -1;  // Keep track of currently opened Media info
+    for (UINTN i = 0; i < num_handles; i++) {
+        status = bs->OpenProtocol(handle_buffer[i],
+                                  &bio_guid,
+                                  (VOID **)&biop,
+                                  image,
+                                  NULL,
+                                  EFI_OPEN_PROTOCOL_GET_PROTOCOL);
+        
+        if (EFI_ERROR(status)) {
+            printf_c16(u"Could not Open Block IO protocol on handle %u.\r\n", i);
+            continue;
+        }
+        
+        if (biop->Media->LastBlock == 0 || biop->Media->LogicalPartition ||
+            !biop->Media->MediaPresent || biop->Media->ReadOnly) {
+            continue;
+        }
+        
+        // Print Block IO Media Info for this Disk/partition
+        if (last_media_id != biop->Media->MediaId) {
+            last_media_id = biop->Media->MediaId;
+            printf_c16(u"Media ID: %u %s\r\n",
+                       last_media_id,
+                       (last_media_id == this_image_media_id ? u"(Disk Image)" : u""));
+        }
+        
+        UINTN size = biop->Media->LastBlock * biop->Media->BlockSize;
+        printf_c16(u"Rmv: %.1s, BlkSz: %u, LstBlk: %llu, LwLBA: %llu\r\n"
+                   u"Size: %llu/%llu MiB/%llu GiB\r\n\r\n",
+                   biop->Media->RemovableMedia   ? u"Y" : u"N",
+                   biop->Media->BlockSize,
+                   biop->Media->LastBlock,
+                   biop->Media->LowestAlignedLba,
+                   size, size / (1024 * 1024), size / (1024 * 1024 * 1024)
+                   );
+        
+    }
+    
+    printf_c16(u"Press any key to go back..\r\n");
+    get_key();
+    
+
+    return status;
+}
+
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
     
     init_global_varibles(ImageHandle,SystemTable);
@@ -2429,7 +2500,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             u"Print ACPI Tables",
             u"Print Efi Global Varibles",
             u"Change Boot Variables",
-            u"Add Boot Variables"
+            u"Add Boot Variables",
+            u"Write Disk Image To Other Disk"
         };
         
         EFI_STATUS (*menu_funcs[])(void) = {
@@ -2445,7 +2517,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable){
             print_acpi_tables,
             print_efi_global_varibles,
             change_boot_variables,
-            add_boot_variables
+            add_boot_variables,
+            write_to_another_disk
         };
         
         // TODO: Connect all controllers found for all handles, to hopefully fix
